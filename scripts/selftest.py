@@ -239,6 +239,97 @@ def main(argv: list[str] | None = None) -> int:
             print(result.stdout)
         expect("updated=1" in result.stdout, f"expected updated=1:\n{result.stdout}")
 
+        step("verify.py reports all sessions clean")
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        if args.verbose:
+            print(result.stdout)
+        expect(result.returncode == 0, f"verify.py returncode={result.returncode}:\n{result.stderr}")
+        expect("sessions verified clean" in result.stdout, f"missing summary line:\n{result.stdout}")
+
+        step("verify.py catches a tampered transcript")
+        deposits_again = sorted(p for p in (archive / "sessions").rglob("transcript.jsonl"))
+        tampered = deposits_again[0]
+        original_bytes = tampered.read_bytes()
+        with tampered.open("ab") as f:
+            f.write(b'{"tampered":true}\n')
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect(result.returncode == 1, "verify.py did not exit 1 on tamper")
+        expect("TAMPER" in result.stdout, f"verify.py missed tamper:\n{result.stdout}")
+        tampered.write_bytes(original_bytes)
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect(result.returncode == 0, "verify.py still failing after restore")
+
+        step("search.py returns matches for a known term")
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "entanglement",
+            "--archive", str(archive),
+        )
+        if args.verbose:
+            print(result.stdout)
+        expect(result.returncode == 0, f"search.py returncode={result.returncode}: {result.stderr}")
+        expect("match" in result.stdout, f"search.py output unexpected:\n{result.stdout}")
+
+        step("search.py with --json returns parseable output")
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "entanglement", "--json",
+            "--archive", str(archive),
+        )
+        parsed = json.loads(result.stdout)
+        expect(isinstance(parsed, list) and len(parsed) > 0, "search.py --json empty or malformed")
+
+        step("cite.py produces a bundle with all four files")
+        first_session = next((archive / "sessions").rglob("manifest.json")).parent.name
+        bundle_dir = tmp / "bundle"
+        result = run_script(
+            REPO_ROOT / "scripts" / "cite.py", first_session,
+            "--archive", str(archive),
+            "--out", str(bundle_dir),
+        )
+        if args.verbose:
+            print(result.stdout)
+        expect(result.returncode == 0, f"cite.py returncode={result.returncode}: {result.stderr}")
+        for fname in ("transcript.jsonl", "manifest.json", "cite.txt", "render.md"):
+            expect((bundle_dir / fname).exists(), f"bundle missing {fname}")
+        expect("SHA-256" in (bundle_dir / "cite.txt").read_text(),
+               "cite.txt missing SHA-256 line")
+
+        step("cite.py --citation-only emits only the citation")
+        result = run_script(
+            REPO_ROOT / "scripts" / "cite.py", first_session,
+            "--archive", str(archive),
+            "--citation-only",
+        )
+        expect("Holotype session" in result.stdout and "SHA-256" in result.stdout,
+               f"--citation-only output unexpected:\n{result.stdout}")
+
+        step("context.py prints the absolute transcript path")
+        result = run_script(
+            REPO_ROOT / "scripts" / "context.py", first_session,
+            "--archive", str(archive),
+        )
+        expect(result.returncode == 0, f"context.py returncode={result.returncode}")
+        printed_path = Path(result.stdout.strip())
+        expect(printed_path.exists() and printed_path.name == "transcript.jsonl",
+               f"context.py path invalid: {printed_path}")
+
+        step("reindex.py rebuilds the SQLite from scratch")
+        index_path = archive / ".holotype" / "index.sqlite"
+        expect(index_path.exists(), "index missing before reindex")
+        index_path.unlink()
+        expect(not index_path.exists(), "index didn't actually delete")
+        result = run_script(REPO_ROOT / "scripts" / "reindex.py", "--archive", str(archive))
+        if args.verbose:
+            print(result.stdout)
+        expect(result.returncode == 0, f"reindex.py returncode={result.returncode}: {result.stderr}")
+        expect(index_path.exists(), "reindex.py didn't recreate the index")
+        # Search should work again
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "entanglement",
+            "--archive", str(archive), "--json",
+        )
+        parsed = json.loads(result.stdout)
+        expect(len(parsed) > 0, "search returned 0 hits after reindex")
+
         print("\nALL CHECKS PASSED")
         success = True
         return 0

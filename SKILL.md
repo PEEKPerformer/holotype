@@ -83,12 +83,16 @@ Read these before any operation:
 | Want to... | Run |
 |------------|-----|
 | First-time setup | Conduct wizard, then `python scripts/init.py --path <p> --remote-url <u> --remote-kind <k>` |
+| Install macOS background tick (after setup) | `python scripts/install-launchd.py --archive <p>` |
 | Deposit new sessions (preferred — from the rsync backup) | `python scripts/ingest.py --source ~/Documents/Claude-Backups` |
 | Deposit directly from live Claude Code state | `python scripts/ingest.py --source ~/.claude/projects` |
-| Find sessions matching text (grep MVP) | `python scripts/search.py "<query>"` |
+| Find sessions matching text (FTS5) | `python scripts/search.py "<query>"` |
+| Just the citation string for one session | `python scripts/cite.py <session-id> --citation-only` |
 | Print the manifest for one session | `python scripts/cite.py <session-id> --manifest-only` |
-| Produce a citable bundle for one session | `python scripts/cite.py <session-id>` |
+| Produce a full citable bundle for one session | `python scripts/cite.py <session-id>` |
 | Verify the archive's hash chain | `python scripts/verify.py` |
+| Verify a single session | `python scripts/verify.py <session-id>` |
+| Drop and rebuild the SQLite index from the canonical archive | `python scripts/reindex.py` |
 | Load a past session's transcript into this chat | `python scripts/context.py <session-id>` then `Read` the printed path |
 | Push to the configured remote (explicit, never auto) | confirm with user, then `git -C <archive> push` |
 
