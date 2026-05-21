@@ -29,6 +29,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from holotype.archive import resolve_session_by_prefix
+
 
 def find_archive(explicit: Path | None) -> Path:
     if explicit:
@@ -46,37 +48,14 @@ def find_archive(explicit: Path | None) -> Path:
 def resolve_session(archive: Path, prefix: str) -> tuple[str, Path] | None:
     """Find the session whose ID starts with the given prefix.
 
-    Searches both top-level sessions and nested subagents. Returns
-    (full_session_id, session_dir) or None if not found or ambiguous.
+    Walks the archive recursively via holotype.archive.resolve_session_
+    by_prefix, so Codex deposits under sessions/codex/<date>/ and
+    Claude Code subagents nested under their parents are both visible.
     """
-    sessions_root = archive / "sessions"
-    if not sessions_root.exists():
+    sess_dir = resolve_session_by_prefix(archive, prefix)
+    if sess_dir is None:
         return None
-
-    matches: list[Path] = []
-    for proj in sessions_root.iterdir():
-        if not proj.is_dir():
-            continue
-        for sess in proj.iterdir():
-            if not sess.is_dir():
-                continue
-            if sess.name.startswith(prefix) and (sess / "manifest.json").exists():
-                matches.append(sess)
-            sub_root = sess / "subagents"
-            if sub_root.is_dir():
-                for sub in sub_root.iterdir():
-                    if sub.is_dir() and sub.name.startswith(prefix) and (sub / "manifest.json").exists():
-                        matches.append(sub)
-
-    if not matches:
-        return None
-    if len(matches) > 1:
-        sys.stderr.write(f"ambiguous prefix '{prefix}', matches:\n")
-        for m in matches:
-            sys.stderr.write(f"  {m.name}\n")
-        return None
-
-    return (matches[0].name, matches[0])
+    return (sess_dir.name, sess_dir)
 
 
 def render_markdown(transcript: Path) -> str:

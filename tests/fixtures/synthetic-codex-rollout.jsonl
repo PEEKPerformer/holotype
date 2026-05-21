@@ -1,0 +1,8 @@
+{"id":"deadbeef-cafe-4567-89ab-cdef01234567","timestamp":"2026-01-20T15:00:00.000Z","instructions":null,"git":{"commit_hash":"abc123def456","branch":"main","repository_url":"https://github.com/test/codex-fixture.git"}}
+{"record_type":"state"}
+{"type":"message","id":null,"role":"user","content":[{"type":"input_text","text":"Please summarize the photoelectric effect in three sentences."}]}
+{"record_type":"state"}
+{"type":"reasoning","id":"rs_fixture_001","summary":[{"type":"summary_text","text":"The user wants a concise summary. I'll deliver three sentences covering the essential physics."}]}
+{"type":"message","id":"msg_fixture_001","role":"assistant","content":[{"type":"output_text","text":"The photoelectric effect is the ejection of electrons from a material when light strikes it. Einstein explained it by treating light as quanta (photons) of energy hν, where the kinetic energy of the ejected electron is hν minus the material's work function. The effect requires a minimum photon frequency to occur regardless of light intensity, which contradicted classical wave theory."}]}
+{"type":"function_call","name":"shell","arguments":"{\"command\":[\"echo\",\"photoelectric demo\"]}","call_id":"call_fixture_001"}
+{"type":"function_call_output","call_id":"call_fixture_001","output":"photoelectric demo\n"}

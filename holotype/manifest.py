@@ -1,10 +1,11 @@
-"""Build per-session manifests from raw Claude Code JSONLs.
+"""Build per-session manifests from raw agent-CLI transcripts.
 
 A manifest records the minimum metadata needed to interpret a transcript
 later: SHA-256 of the raw file (chain of custody), models that appeared,
-timestamp bookends, message count, the original cwd Claude Code recorded,
-and an environment snapshot. The transcript itself is the source of truth;
-the manifest is a derived index card you can cite from.
+timestamp bookends, message count, the original cwd / project recorded
+by the CLI, the source platform, and an environment snapshot. The
+transcript itself is the source of truth; the manifest is a derived
+index card you can cite from.
 """
 
 from __future__ import annotations
@@ -15,9 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from holotype.hashing import sha256_file
+from holotype.sources.base import Source
 
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 
 @dataclass
@@ -25,6 +27,7 @@ class SessionManifest:
     """Per-session manifest. Serialized to manifest.json next to the transcript."""
 
     manifest_version: int
+    source: str
     session_id: str
     project_dir_encoded: str
     project_dir_decoded: str | None
@@ -61,20 +64,15 @@ def project_dir_decoded(encoded: str) -> str | None:
     return encoded.replace("-", "/")
 
 
-def session_id_from_filename(filename: str) -> str:
-    """Extract the session UUID from a JSONL filename."""
-    return Path(filename).stem
-
-
-def scan_jsonl(path: Path) -> dict:
+def scan_jsonl(path: Path, source_cls: type[Source]) -> dict:
     """Single-pass scan of a JSONL collecting all metadata in one read.
 
     Returns a dict with: message_count, first_timestamp, last_timestamp,
     models (set), has_tool_use, has_thinking, has_compaction, project_dir.
 
-    Tolerates malformed lines (skipped, not raised) because the JSONL is
-    the source of truth and we never want metadata extraction to refuse
-    to deposit a real transcript.
+    Lines that the Source's parser rejects (None) are not counted as
+    messages — this keeps Codex's "record_type: state" filler from
+    inflating message counts.
     """
     state = {
         "message_count": 0,
@@ -89,52 +87,53 @@ def scan_jsonl(path: Path) -> dict:
 
     with path.open("rb") as f:
         for line in f:
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
+            info = source_cls.parse_line(line)
+            if info is None:
                 continue
-            if not isinstance(obj, dict):
+            # Skip the session-header pseudo-record (Codex line-1).
+            if "header" in info.flags:
+                if info.timestamp and state["first_timestamp"] is None:
+                    state["first_timestamp"] = info.timestamp
+                    state["last_timestamp"] = info.timestamp
                 continue
 
             state["message_count"] += 1
-
-            ts = obj.get("timestamp")
-            if isinstance(ts, str):
+            if info.timestamp:
                 if state["first_timestamp"] is None:
-                    state["first_timestamp"] = ts
-                state["last_timestamp"] = ts
-
-            cwd = obj.get("cwd")
-            if isinstance(cwd, str) and state["project_dir_cwd"] is None:
-                state["project_dir_cwd"] = cwd
-
-            if obj.get("isCompactSummary"):
+                    state["first_timestamp"] = info.timestamp
+                state["last_timestamp"] = info.timestamp
+            if info.model:
+                state["models"].add(info.model)
+            if info.has_tool_use:
+                state["has_tool_use"] = True
+            if info.has_thinking:
+                state["has_thinking"] = True
+            if "compaction" in info.flags:
                 state["has_compaction"] = True
 
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else None
-            if msg:
-                model = msg.get("model")
-                if isinstance(model, str):
-                    state["models"].add(model)
-
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for item in content:
-                        if not isinstance(item, dict):
-                            continue
-                        t = item.get("type")
-                        if t == "tool_use":
-                            state["has_tool_use"] = True
-                        elif t == "thinking":
-                            state["has_thinking"] = True
+            # Source-specific: Claude Code carries cwd on user-message
+            # turns. Codex carries repository_url in the line-1 header
+            # (already captured above as timestamp); cwd-equivalent for
+            # Codex would be parsing the <environment_context> blob,
+            # which we skip for now to keep this layer source-agnostic.
+            try:
+                import json as _json
+                obj = _json.loads(line)
+                cwd = obj.get("cwd") if isinstance(obj, dict) else None
+                if isinstance(cwd, str) and state["project_dir_cwd"] is None:
+                    state["project_dir_cwd"] = cwd
+            except Exception:
+                pass
 
     return state
 
 
 def build_manifest(
     jsonl_path: Path,
+    source_cls: type[Source],
     project_dir_encoded: str,
     *,
+    session_id: str,
     holotype_version: str,
     source_path: str,
     env: dict | None = None,
@@ -142,17 +141,19 @@ def build_manifest(
 ) -> SessionManifest:
     """Build a SessionManifest from a JSONL file on disk.
 
-    `project_dir_encoded` is the project-dir name as Claude Code writes it
-    (e.g. `-Users-brendenferland-Git-ResistaMet-GUI`). `source_path` is
-    where the JSONL was read from (for provenance — recorded in the
-    manifest but never trusted).
+    `session_id` is passed in (rather than derived from `jsonl_path.stem`)
+    because at deposit time `jsonl_path` is the archive path
+    `.../transcript.jsonl` and has lost the original filename. The caller
+    is responsible for passing the session_id the Source resolved from
+    the original source filename.
     """
-    scan = scan_jsonl(jsonl_path)
+    scan = scan_jsonl(jsonl_path, source_cls)
     decoded_cwd = scan.get("project_dir_cwd")
 
     return SessionManifest(
         manifest_version=MANIFEST_VERSION,
-        session_id=session_id_from_filename(jsonl_path.name),
+        source=source_cls.name,
+        session_id=session_id,
         project_dir_encoded=project_dir_encoded,
         project_dir_decoded=decoded_cwd or project_dir_decoded(project_dir_encoded),
         transcript_filename=jsonl_path.name,

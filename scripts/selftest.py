@@ -84,6 +84,19 @@ def materialize_source(tmp: Path) -> Path:
     return src
 
 
+def materialize_codex_source(tmp: Path) -> Path:
+    """Build a fake `~/.codex/sessions/`-shaped source dir."""
+    import os, time
+    src = tmp / "codex-source"
+    date_dir = src / "2026" / "01" / "20"
+    date_dir.mkdir(parents=True)
+    out = date_dir / "rollout-2026-01-20T15-00-00-deadbeef-cafe-4567-89ab-cdef01234567.jsonl"
+    shutil.copy(FIXTURES / "synthetic-codex-rollout.jsonl", out)
+    older = time.time() - 60
+    os.utime(out, (older, older))
+    return src
+
+
 def run_script(script: Path, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     import os
     env = os.environ.copy()
@@ -169,7 +182,9 @@ def main(argv: list[str] | None = None) -> int:
                 manifest["sha256"] == recomputed,
                 f"sha256 mismatch for {tr}: manifest={manifest['sha256']}, recomputed={recomputed}",
             )
-            expect(manifest["manifest_version"] == 1, "manifest_version != 1")
+            expect(manifest["manifest_version"] == 2, "manifest_version != 2")
+            expect(manifest.get("source") == "claude-code",
+                   f"manifest.source wrong: {manifest.get('source')}")
             expect(manifest["message_count"] > 0, "message_count is zero")
             expect(len(manifest["models"]) > 0, "no models recorded")
 
@@ -358,6 +373,53 @@ def main(argv: list[str] | None = None) -> int:
         )
         parsed = json.loads(result.stdout)
         expect(len(parsed) > 0, "search returned 0 hits after reindex")
+
+        step("Codex source ingests a rollout into sessions/codex/...")
+        codex_src = materialize_codex_source(tmp)
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(archive),
+            "--source", str(codex_src),
+            "--source-name", "codex",
+        )
+        if args.verbose:
+            print(result.stdout)
+            print(result.stderr, file=sys.stderr)
+        expect(result.returncode == 0, f"codex ingest returncode={result.returncode}: {result.stderr}")
+        expect("new=1" in result.stdout, f"expected new=1 from codex ingest:\n{result.stdout}")
+
+        codex_deposits = list((archive / "sessions" / "codex").rglob("transcript.jsonl"))
+        expect(len(codex_deposits) == 1, f"expected 1 codex deposit, got {len(codex_deposits)}")
+
+        codex_manifest = json.loads(codex_deposits[0].with_name("manifest.json").read_text())
+        expect(codex_manifest["source"] == "codex", f"codex manifest source wrong: {codex_manifest.get('source')}")
+        expect(codex_manifest["session_id"] == "deadbeef-cafe-4567-89ab-cdef01234567",
+               f"codex session_id wrong: {codex_manifest.get('session_id')}")
+        expect(codex_manifest["has_thinking"] is True, "codex reasoning block missed")
+        expect(codex_manifest["has_tool_use"] is True, "codex function_call missed")
+        expect(codex_manifest["message_count"] >= 2, "codex message count too low")
+
+        step("Codex FTS hits work (reasoning + tool-call content)")
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "photoelectric",
+            "--archive", str(archive), "--json",
+        )
+        parsed = json.loads(result.stdout)
+        expect(len(parsed) > 0, "FTS query for codex content 'photoelectric' returned 0 hits")
+
+        step("cite.py finds the codex session by prefix")
+        bundle_dir = tmp / "codex-bundle"
+        result = run_script(
+            REPO_ROOT / "scripts" / "cite.py", "deadbeef-cafe-4567-89ab-cdef01234567",
+            "--archive", str(archive),
+            "--out", str(bundle_dir),
+        )
+        expect(result.returncode == 0, f"cite for codex session failed: {result.stderr}")
+        expect((bundle_dir / "transcript.jsonl").exists(), "codex bundle missing transcript")
+
+        step("verify.py still clean with mixed claude-code + codex sessions")
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect(result.returncode == 0, f"mixed-source verify failed: {result.stderr}")
 
         print("\nALL CHECKS PASSED")
         success = True

@@ -26,6 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from holotype.archive import iter_all_sessions
 from holotype.hashing import sha256_file
 
 
@@ -44,29 +45,12 @@ def find_archive(explicit: Path | None) -> Path:
 
 def iter_sessions(archive: Path, prefix: str | None):
     """Yield (session_id, transcript_path, manifest_path) for each session,
-    including subagents nested under their parents."""
-    sessions_root = archive / "sessions"
-    if not sessions_root.exists():
-        return
-    for proj in sorted(sessions_root.iterdir()):
-        if not proj.is_dir():
+    walking the archive at arbitrary depth (Claude Code subagents AND
+    Codex deposits under sessions/codex/.../)."""
+    for sess_dir, _ in iter_all_sessions(archive):
+        if prefix and not sess_dir.name.startswith(prefix):
             continue
-        for sess in sorted(proj.iterdir()):
-            if not sess.is_dir():
-                continue
-            t = sess / "transcript.jsonl"
-            m = sess / "manifest.json"
-            if t.exists() and m.exists() and (not prefix or sess.name.startswith(prefix)):
-                yield sess.name, t, m
-            sub_root = sess / "subagents"
-            if sub_root.is_dir():
-                for sub in sorted(sub_root.iterdir()):
-                    if not sub.is_dir():
-                        continue
-                    t = sub / "transcript.jsonl"
-                    m = sub / "manifest.json"
-                    if t.exists() and m.exists() and (not prefix or sub.name.startswith(prefix)):
-                        yield sub.name, t, m
+        yield sess_dir.name, sess_dir / "transcript.jsonl", sess_dir / "manifest.json"
 
 
 def main(argv: list[str] | None = None) -> int:

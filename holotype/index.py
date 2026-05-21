@@ -18,7 +18,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -40,6 +40,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS sessions (
             session_id        TEXT PRIMARY KEY,
+            source            TEXT,
             parent_session_id TEXT,
             project_dir       TEXT,
             first_ts          TEXT,
@@ -52,6 +53,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_sessions_parent
             ON sessions(parent_session_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_source
+            ON sessions(source);
 
         CREATE TABLE IF NOT EXISTS messages (
             session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -108,54 +111,15 @@ def open_index(db_path: Path):
         conn.close()
 
 
-def _extract_text_for_fts(msg_obj: dict) -> str:
-    """Flatten a message's content array into a single searchable string.
-
-    Includes user text, assistant text, thinking blocks, tool inputs, and
-    tool outputs. Forensic completeness: we want a single FTS hit to
-    surface ANY mention of a term, regardless of what kind of message
-    contained it.
-    """
-    parts: list[str] = []
-
-    msg = msg_obj.get("message") if isinstance(msg_obj.get("message"), dict) else None
-    if not msg:
-        return ""
-
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        t = item.get("type")
-        if t == "text":
-            parts.append(item.get("text") or "")
-        elif t == "thinking":
-            parts.append(item.get("thinking") or "")
-        elif t == "tool_use":
-            parts.append(f"[tool_use:{item.get('name','?')}]")
-            inp = item.get("input")
-            if isinstance(inp, dict):
-                parts.append(json.dumps(inp, ensure_ascii=False))
-        elif t == "tool_result":
-            inner = item.get("content")
-            if isinstance(inner, str):
-                parts.append(inner)
-            elif isinstance(inner, list):
-                for sub in inner:
-                    if isinstance(sub, dict) and isinstance(sub.get("text"), str):
-                        parts.append(sub["text"])
-    return "\n".join(parts)
+# Per-source FTS extraction lives in each Source class via parse_line.
+# The reindex_session() function below dispatches by source.
 
 
 def upsert_session(
     conn: sqlite3.Connection,
     *,
     session_id: str,
+    source: str = "claude-code",
     project_dir: str,
     first_ts: str | None,
     last_ts: str | None,
@@ -167,11 +131,12 @@ def upsert_session(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO sessions(session_id, parent_session_id, project_dir,
+        INSERT INTO sessions(session_id, source, parent_session_id, project_dir,
                              first_ts, last_ts, message_count, sha256,
                              deposited_at, git_commit)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
+            source            = excluded.source,
             parent_session_id = excluded.parent_session_id,
             project_dir       = excluded.project_dir,
             first_ts          = excluded.first_ts,
@@ -181,43 +146,53 @@ def upsert_session(
             deposited_at      = excluded.deposited_at,
             git_commit        = excluded.git_commit
         """,
-        (session_id, parent_session_id, project_dir, first_ts, last_ts,
+        (session_id, source, parent_session_id, project_dir, first_ts, last_ts,
          message_count, sha256, deposited_at, git_commit),
     )
 
 
-def reindex_session(conn: sqlite3.Connection, session_id: str, jsonl_path: Path) -> int:
+def reindex_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    jsonl_path: Path,
+    source_cls=None,
+) -> int:
     """Drop and rewrite all message rows + FTS entries for a single session.
 
-    Returns the number of messages indexed.
+    `source_cls` is a holotype.sources.base.Source subclass that owns the
+    transcript's schema. If omitted, defaults to ClaudeCodeSource (the
+    historical behavior, so old call sites still work).
+
+    Returns the number of message rows written. Note: this is rows
+    *indexed*, including session-header pseudo-records — slightly higher
+    than what the manifest's `message_count` reports.
     """
+    if source_cls is None:
+        from holotype.sources.claude_code import ClaudeCodeSource
+        source_cls = ClaudeCodeSource
+
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
 
     n = 0
     with jsonl_path.open("rb") as f:
         for sequence, line in enumerate(f):
+            info = source_cls.parse_line(line)
+            if info is None:
+                continue
+
+            # Try to grab parent_uuid and uuid only if the schema has them
+            # (Claude Code does; Codex doesn't). Tolerant — we don't fail
+            # if these fields are absent.
+            uuid = None
+            parent_uuid = None
             try:
                 obj = json.loads(line)
+                if isinstance(obj, dict):
+                    uuid = obj.get("uuid") or obj.get("id")
+                    parent_uuid = obj.get("parentUuid") or obj.get("parent_id")
             except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            role = (msg.get("role") if isinstance(msg, dict) else None) or obj.get("type")
-            model = msg.get("model") if isinstance(msg, dict) else None
-            timestamp = obj.get("timestamp")
-
-            has_tool_use = 0
-            has_thinking = 0
-            if isinstance(msg, dict) and isinstance(msg.get("content"), list):
-                for c in msg["content"]:
-                    if isinstance(c, dict):
-                        if c.get("type") == "tool_use":
-                            has_tool_use = 1
-                        elif c.get("type") == "thinking":
-                            has_thinking = 1
+                pass
 
             conn.execute(
                 """INSERT INTO messages(session_id, sequence, uuid, parent_uuid,
@@ -227,23 +202,22 @@ def reindex_session(conn: sqlite3.Connection, session_id: str, jsonl_path: Path)
                 (
                     session_id,
                     sequence,
-                    obj.get("uuid"),
-                    obj.get("parentUuid"),
-                    role,
-                    timestamp,
-                    model,
-                    has_tool_use,
-                    has_thinking,
+                    uuid,
+                    parent_uuid,
+                    info.role,
+                    info.timestamp,
+                    info.model,
+                    1 if info.has_tool_use else 0,
+                    1 if info.has_thinking else 0,
                     line.decode("utf-8", errors="replace").rstrip("\n"),
                 ),
             )
 
-            fts_content = _extract_text_for_fts(obj)
-            if fts_content:
+            if info.fts_content:
                 conn.execute(
                     """INSERT INTO messages_fts(content, role, session_id, sequence)
                        VALUES (?, ?, ?, ?)""",
-                    (fts_content, role, session_id, sequence),
+                    (info.fts_content, info.role or "", session_id, sequence),
                 )
             n += 1
     return n
