@@ -40,7 +40,25 @@ python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-ki
 
 The script writes `<archive>/.holotype/config.json`, drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive.
 
-**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes" to each. The point is informed consent on the remote decision, not speed.
+**Step 6 — Background-tick opt-in (macOS only).** Ask:
+
+> "Claude Code sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses. It is local-only and never pushes to a remote. Install? (Y/n)"
+
+If yes:
+```bash
+python scripts/install-launchd.py --archive <abs-path>
+```
+
+If on Linux or Windows, skip this step and tell the user the equivalent can be set up later via systemd user unit (Linux) or Task Scheduler (Windows).
+
+**Step 7 — First ingest.** Run an initial deposit to seed the archive from the existing rsync backup:
+```bash
+python scripts/ingest.py --archive <abs-path>
+```
+
+Report the count of sessions deposited.
+
+**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes" to each. The point is informed consent on the remote decision, not speed.
 
 ## Where things live (after setup)
 
@@ -52,11 +70,12 @@ The script writes `<archive>/.holotype/config.json`, drops `VERIFY.md` + `README
 
 Read these before any operation:
 
-1. **Never modify a deposited transcript.** Once a JSONL is in the archive, it is immutable. Re-ingesting is a no-op (UUID dedup). If a session needs an addendum, deposit a *new* session that references the prior one — never edit in place.
+1. **Never hand-edit a deposited transcript.** The archive's git tree is append-only from outside. If a session JSONL grows in the source (a session keeps running and adds more turns), the next `ingest.py` will detect the change and record it as an `update` commit — that is the only mechanism by which a deposited transcript ever changes on disk.
 2. **Never filter content.** Tool calls, tool results, thinking blocks, system reminders, hook outputs — every byte is part of the scientific record. The skill's whole point is forensic completeness.
 3. **Never auto-push to a remote.** Even if a remote is configured, push only when the user explicitly says so. Confirm before each push, summarizing what will be uploaded (count of new sessions, total bytes).
-4. **Verify after every deposit.** Run `scripts/verify.py` after ingest. If the hash chain breaks, stop and report — do not "fix" by re-hashing.
-5. **The archive is git-tracked.** Every deposit is a commit. Commits should be deterministic (same input → same hash) and reviewable.
+4. **The archive is git-tracked.** Every deposit is a commit with a deterministic message of the form `deposit: <project>/<session-id>` or `update: <project>/<session-id>`. Both the JSONL and its manifest live under `sessions/<project-dir>/<session-id>/`.
+5. **The SQLite index at `<archive>/.holotype/index.sqlite` is derived data.** It speeds up search. It is NOT a source of truth. It can be deleted and rebuilt with `scripts/reindex.py` (planned) at any time.
+6. **Live-file safety is built in.** `ingest.py` skips JSONLs modified in the last 2 seconds and re-checks mtime after reading. You should not need to add additional checks.
 
 ## Common operations
 
