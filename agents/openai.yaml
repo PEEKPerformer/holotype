@@ -1,0 +1,24 @@
+# OpenAI-specific metadata for the holotype skill, per the agent skills
+# standard at https://agentskills.io. Read by Codex CLI / Codex app to set
+# UI presentation, invocation policy, and tool dependencies.
+#
+# The instructions themselves live in SKILL.md alongside this file and are
+# shared across all skill-supporting CLIs (Claude Code, Codex, etc.).
+
+interface:
+  display_name: "holotype"
+  short_description: >
+    Forensic-grade archival of Claude Code (and other) session transcripts
+    into a hash-chained git repository suitable for scientific publication.
+  brand_color: "#1f2937"
+
+policy:
+  # Codex-side counterpart of Anthropic's `disable-model-invocation: true`.
+  # Depositing scientific provenance artifacts is a deliberate user action,
+  # not an opportunistic background trigger. The user must invoke this
+  # skill explicitly (e.g., `$holotype` in Codex, `/holotype` in Claude Code).
+  allow_implicit_invocation: false
+
+# No external tool dependencies declared. The skill ships its own scripts
+# in scripts/ and uses only stdlib + git (assumed installed) + macOS
+# launchd (for the optional background tick).

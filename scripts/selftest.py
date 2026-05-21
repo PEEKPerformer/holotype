@@ -87,6 +87,8 @@ def materialize_source(tmp: Path) -> Path:
 def run_script(script: Path, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     import os
     env = os.environ.copy()
+    # Prevent the selftest from clobbering the user's real ~/.config/holotype/archive-path.
+    env["HOLOTYPE_NO_POINTER"] = "1"
     if env_extra:
         env.update(env_extra)
     return subprocess.run(

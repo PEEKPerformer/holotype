@@ -12,7 +12,7 @@ You are operating on the **holotype** archive — a content-addressable, hash-ch
 
 Before depositing anything, the user must consciously choose **where the archive lives** and **whether it has a remote**. Transcripts contain everything Claude saw — file paths, the contents of files that were read, command output that may have included credentials, internal codebase details. Pushing to any remote is a privacy and security decision that must not be a silent default.
 
-**Check** whether `~/.config/holotype/archive-path` exists. If it does, read it to find the archive — setup is already done. If it doesn't, **conduct the wizard conversationally** (use `AskUserQuestion` for each step, do not just call `input()`), then invoke `scripts/init.py` at the end with all answers as flags.
+**Check** whether `~/.config/holotype/archive-path` exists. If it does, read it to find the archive — setup is already done. If it doesn't, **conduct the wizard one decision at a time**, asking the user via whatever the host CLI provides for structured user input (Claude Code: `AskUserQuestion`; Codex: in-chat prompts; etc.). Do not bypass with `input()` from the script — the wizard belongs in the conversation so the user can revise answers before anything is written. After all answers are collected, invoke `scripts/init.py` with them as flags.
 
 ### Wizard steps
 
@@ -100,9 +100,13 @@ Session IDs are UUID prefixes — typically 8 hex chars are enough to disambigua
 
 ## Invocation model
 
-This skill is **user-invocable only** (`disable-model-invocation: true`). You will never auto-trigger it based on conversational cues. The user invokes it explicitly with `/holotype`, and only then do you consult this file. If the user is doing paper-relevant work and a Claude Code archival pattern would help them, you may *mention* that `/holotype` exists — but you do not invoke it on their behalf.
+This skill is **user-invocable only**. Implicit invocation is disabled in both implementations of the open agent skills standard:
+- Claude Code reads `disable-model-invocation: true` from SKILL.md frontmatter.
+- Codex reads `policy.allow_implicit_invocation: false` from `agents/openai.yaml`.
 
-Rationale: depositing transcripts into a hash-chained scientific archive is a deliberate provenance decision, not an opportunistic background task. The unfiltered safety-net backup is already handled by the user's `Stop` hook (rsync to `~/Documents/Claude-Backups/`). Holotype is for *curated* deposits the user wants on the record. Conflating those two layers would undermine both.
+You will never auto-trigger this skill based on conversational cues. The user invokes it explicitly (`/holotype` in Claude Code, `$holotype` in Codex), and only then do you consult this file. If the user is doing paper-relevant work and an archival pattern would help them, you may *mention* that holotype exists — but you do not invoke it on their behalf.
+
+Rationale: depositing transcripts into a hash-chained scientific archive is a deliberate provenance decision, not an opportunistic background task. The unfiltered safety-net backup is already handled separately (e.g., a `Stop`-hook rsync to `~/Documents/Claude-Backups/` on the original author's machine). Holotype is for *curated* deposits the user wants on the record. Conflating those two layers would undermine both.
 
 ## Verification without Claude
 

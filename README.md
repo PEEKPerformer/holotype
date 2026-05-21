@@ -46,39 +46,46 @@ A pointer at `~/.config/holotype/archive-path` records the archive's location so
 
 Pre-alpha. Skill metadata + init wizard implemented. Ingest, search, cite, verify, and context-load scripts are next.
 
-## Install (development)
+## Install
 
-Clone alongside your other Claude Code skills:
+`holotype` is an [agent skill](https://agentskills.io) and works in any CLI that implements the standard — Claude Code, Codex, and others. The skill format (SKILL.md + scripts/) is identical across implementations; only the discovery path differs.
 
 ```bash
-git clone git@github.com:PEEKPerformer/holotype.git ~/Git/holotype
+git clone https://github.com/PEEKPerformer/holotype.git ~/Git/holotype
 ```
 
-Then register as a user-level skill. Either symlink:
+Then symlink (or copy) into the host CLI's user-level skill directory:
 
 ```bash
+# Claude Code
 ln -s ~/Git/holotype ~/.claude/skills/holotype
+
+# Codex
+ln -s ~/Git/holotype ~/.agents/skills/holotype
 ```
 
-…or register as a plugin source in your existing `brenden-skills` / equivalent plugin repo.
+You can do both — the same skill source serves both CLIs. OpenAI-specific UI/policy metadata lives in `agents/openai.yaml`; Anthropic-specific frontmatter lives in `SKILL.md`. The instructions and scripts are shared.
+
+Per-repo installs work too: drop the skill under `.claude/skills/` or `.agents/skills/` inside a project.
 
 ## Usage
 
 `holotype` is **deliberately manual**. It is never auto-triggered by phrases or keywords — every invocation is an explicit user action, because depositing data into a scientific archive is the kind of decision a human should make consciously.
 
-### Inside Claude Code
+### Inside a skills-supporting CLI
 
-Invoke the skill with the slash command:
+Invoke the skill explicitly:
 
 ```
-/holotype
+/holotype    # Claude Code
+$holotype    # Codex
 ```
 
-The first invocation walks you through the interactive setup wizard (archive location, remote choice, background-tick opt-in). Subsequent invocations let you deposit, search, cite, verify, or load context — Claude will ask which operation you want.
+The first invocation walks you through the interactive setup wizard (archive location, remote choice, background-tick opt-in). Subsequent invocations let you deposit, search, cite, verify, or load context — the host LLM will ask which operation you want.
 
-### Outside Claude Code
+### From any shell, without an LLM
 
-Scripts are directly runnable from any shell. This is also how the launchd background tick invokes them — no Claude required:
+Scripts are directly runnable. This is also how the macOS launchd background tick invokes them — no LLM required:
 
 ```bash
 python scripts/init.py --path ~/Documents/holotype-archive --remote-url "" --remote-kind none

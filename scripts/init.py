@@ -212,6 +212,13 @@ def write_archive_gitignore(archive: Path) -> None:
 
 
 def write_pointer(archive: Path) -> None:
+    """Write the global archive pointer.
+
+    Honored only when HOLOTYPE_NO_POINTER is unset. Tests and selftest set
+    HOLOTYPE_NO_POINTER=1 so they don't clobber the user's real pointer.
+    """
+    if os.environ.get("HOLOTYPE_NO_POINTER"):
+        return
     POINTER_FILE.parent.mkdir(parents=True, exist_ok=True)
     POINTER_FILE.write_text(str(archive) + "\n")
 
