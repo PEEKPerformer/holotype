@@ -64,20 +64,29 @@ ln -s ~/Git/holotype ~/.claude/skills/holotype
 
 ## Usage
 
-First session in any Claude Code workspace, mention "set up holotype" and Claude will walk you through the interactive wizard. On subsequent sessions:
+`holotype` is **deliberately manual**. It is never auto-triggered by phrases or keywords — every invocation is an explicit user action, because depositing data into a scientific archive is the kind of decision a human should make consciously.
+
+### Inside Claude Code
+
+Invoke the skill with the slash command:
 
 ```
-"deposit recent sessions to holotype"
-"find the holotype session where we discussed 41-minute equilibration"
-"give me a citable bundle for session 3f1c4cf7"
-"verify the holotype archive"
+/holotype
 ```
 
-For shell invocation without Claude in the loop, scripts are directly runnable:
+The first invocation walks you through the interactive setup wizard (archive location, remote choice, background-tick opt-in). Subsequent invocations let you deposit, search, cite, verify, or load context — Claude will ask which operation you want.
+
+### Outside Claude Code
+
+Scripts are directly runnable from any shell. This is also how the launchd background tick invokes them — no Claude required:
 
 ```bash
 python scripts/init.py --path ~/Documents/holotype-archive --remote-url "" --remote-kind none
+python scripts/ingest.py
+python scripts/install-launchd.py --archive ~/Documents/holotype-archive
 ```
+
+The skill is convenience automation over the scripts. The scripts are the engine.
 
 ## License
 

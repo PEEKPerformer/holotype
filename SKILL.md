@@ -1,6 +1,7 @@
 ---
 name: holotype
-description: Forensic-grade archival of Claude Code sessions for scientific reproducibility. Use when depositing past sessions into the archive, searching the archive for prior work, producing citable bundles for papers, verifying archive integrity, or loading a past session's context into the current chat. Trigger on phrases like "deposit this session", "search the archive", "cite this conversation", "verify the holotype archive", "set up holotype", or "load context from session X".
+description: User-invocable skill for forensic-grade archival of Claude Code sessions into a hash-chained git repository suitable for citation in scientific publications. Operations include first-time setup, depositing sessions, searching the archive, producing citable bundles, verifying integrity, and loading past-session context. Deliberate manual invocation only — never auto-triggered. Invoke via /holotype.
+disable-model-invocation: true
 ---
 
 # holotype
@@ -93,17 +94,11 @@ Read these before any operation:
 
 Session IDs are UUID prefixes — typically 8 hex chars are enough to disambiguate.
 
-## When to invoke this skill proactively
+## Invocation model
 
-- After a paper-relevant session ends, suggest depositing.
-- When the user mentions citing a Claude conversation in a paper or note.
-- When the user asks "when did we work on X" or "find that conversation about Y".
-- When the user is preparing supplementary material for a publication.
+This skill is **user-invocable only** (`disable-model-invocation: true`). You will never auto-trigger it based on conversational cues. The user invokes it explicitly with `/holotype`, and only then do you consult this file. If the user is doing paper-relevant work and a Claude Code archival pattern would help them, you may *mention* that `/holotype` exists — but you do not invoke it on their behalf.
 
-## When NOT to invoke
-
-- For general backup of conversations (the user's `Stop` hook already rsyncs everything to `~/Documents/Claude-Backups/` — that is the unfiltered safety net). Holotype is for *curated, citable* deposits.
-- For search across hundreds of sessions purely for navigation — claude-conversation-extractor and similar tools handle that better. Holotype's search is for finding deposit candidates, not casual browsing.
+Rationale: depositing transcripts into a hash-chained scientific archive is a deliberate provenance decision, not an opportunistic background task. The unfiltered safety-net backup is already handled by the user's `Stop` hook (rsync to `~/Documents/Claude-Backups/`). Holotype is for *curated* deposits the user wants on the record. Conflating those two layers would undermine both.
 
 ## Verification without Claude
 
