@@ -49,8 +49,15 @@ def resolve_session(archive: Path, prefix: str) -> tuple[str, Path] | None:
         if not proj.is_dir():
             continue
         for sess in proj.iterdir():
-            if sess.is_dir() and sess.name.startswith(prefix):
+            if not sess.is_dir():
+                continue
+            if sess.name.startswith(prefix) and (sess / "manifest.json").exists():
                 matches.append(sess)
+            sub_root = sess / "subagents"
+            if sub_root.is_dir():
+                for sub in sub_root.iterdir():
+                    if sub.is_dir() and sub.name.startswith(prefix) and (sub / "manifest.json").exists():
+                        matches.append(sub)
     if not matches:
         return None
     if len(matches) > 1:

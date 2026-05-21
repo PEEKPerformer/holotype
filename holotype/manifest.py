@@ -39,6 +39,7 @@ class SessionManifest:
     has_tool_use: bool = False
     has_thinking: bool = False
     has_compaction: bool = False
+    parent_session_id: str | None = None
     deposited_at: str = ""
     holotype_version: str = ""
     source_path: str = ""
@@ -137,6 +138,7 @@ def build_manifest(
     holotype_version: str,
     source_path: str,
     env: dict | None = None,
+    parent_session_id: str | None = None,
 ) -> SessionManifest:
     """Build a SessionManifest from a JSONL file on disk.
 
@@ -164,6 +166,7 @@ def build_manifest(
         has_tool_use=scan["has_tool_use"],
         has_thinking=scan["has_thinking"],
         has_compaction=scan["has_compaction"],
+        parent_session_id=parent_session_id,
         deposited_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         holotype_version=holotype_version,
         source_path=source_path,

@@ -66,6 +66,28 @@ def main(argv: list[str] | None = None) -> int:
         index_path.unlink()
         print(f"  removed {index_path}")
 
+    def _ingest_into_index(conn, sess_dir: Path, project_dir_encoded: str) -> tuple[int, int]:
+        """Returns (sessions_indexed, messages_indexed) for this dir."""
+        transcript = sess_dir / "transcript.jsonl"
+        manifest_path = sess_dir / "manifest.json"
+        if not (transcript.exists() and manifest_path.exists()):
+            return (0, 0)
+        manifest = json.loads(manifest_path.read_text())
+        upsert_session(
+            conn,
+            session_id=sess_dir.name,
+            parent_session_id=manifest.get("parent_session_id"),
+            project_dir=project_dir_encoded,
+            first_ts=manifest.get("first_timestamp"),
+            last_ts=manifest.get("last_timestamp"),
+            message_count=manifest.get("message_count", 0),
+            sha256=manifest.get("sha256", ""),
+            deposited_at=manifest.get("deposited_at", ""),
+            git_commit=None,
+        )
+        n_msgs = reindex_session(conn, sess_dir.name, transcript)
+        return (1, n_msgs)
+
     n_sessions = 0
     n_messages = 0
     with open_index(index_path) as conn:
@@ -76,25 +98,17 @@ def main(argv: list[str] | None = None) -> int:
             for sess in sorted(proj.iterdir()):
                 if not sess.is_dir():
                     continue
-                transcript = sess / "transcript.jsonl"
-                manifest_path = sess / "manifest.json"
-                if not (transcript.exists() and manifest_path.exists()):
-                    continue
-
-                manifest = json.loads(manifest_path.read_text())
-                upsert_session(
-                    conn,
-                    session_id=sess.name,
-                    project_dir=project_dir_encoded,
-                    first_ts=manifest.get("first_timestamp"),
-                    last_ts=manifest.get("last_timestamp"),
-                    message_count=manifest.get("message_count", 0),
-                    sha256=manifest.get("sha256", ""),
-                    deposited_at=manifest.get("deposited_at", ""),
-                    git_commit=None,
-                )
-                n_messages += reindex_session(conn, sess.name, transcript)
-                n_sessions += 1
+                s, m = _ingest_into_index(conn, sess, project_dir_encoded)
+                n_sessions += s
+                n_messages += m
+                sub_root = sess / "subagents"
+                if sub_root.is_dir():
+                    for sub in sorted(sub_root.iterdir()):
+                        if not sub.is_dir():
+                            continue
+                        s, m = _ingest_into_index(conn, sub, project_dir_encoded)
+                        n_sessions += s
+                        n_messages += m
         conn.commit()
 
     print(f"  indexed {n_sessions} sessions ({n_messages} messages)")

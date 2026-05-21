@@ -43,7 +43,8 @@ def find_archive(explicit: Path | None) -> Path:
 
 
 def iter_sessions(archive: Path, prefix: str | None):
-    """Yield (session_id, transcript_path, manifest_path) for each session."""
+    """Yield (session_id, transcript_path, manifest_path) for each session,
+    including subagents nested under their parents."""
     sessions_root = archive / "sessions"
     if not sessions_root.exists():
         return
@@ -53,12 +54,19 @@ def iter_sessions(archive: Path, prefix: str | None):
         for sess in sorted(proj.iterdir()):
             if not sess.is_dir():
                 continue
-            if prefix and not sess.name.startswith(prefix):
-                continue
             t = sess / "transcript.jsonl"
             m = sess / "manifest.json"
-            if t.exists() and m.exists():
+            if t.exists() and m.exists() and (not prefix or sess.name.startswith(prefix)):
                 yield sess.name, t, m
+            sub_root = sess / "subagents"
+            if sub_root.is_dir():
+                for sub in sorted(sub_root.iterdir()):
+                    if not sub.is_dir():
+                        continue
+                    t = sub / "transcript.jsonl"
+                    m = sub / "manifest.json"
+                    if t.exists() and m.exists() and (not prefix or sub.name.startswith(prefix)):
+                        yield sub.name, t, m
 
 
 def main(argv: list[str] | None = None) -> int:

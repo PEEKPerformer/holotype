@@ -65,14 +65,20 @@ def materialize_source(tmp: Path) -> Path:
 
     basic_uuid = "00000000-0000-4000-8000-000000000001"
     mm_uuid = "00000000-0000-4000-8000-000000000002"
+    sub_id = "agent-aff5969"
 
     out_a = proj_a / f"{basic_uuid}.jsonl"
     out_b = proj_b / f"{mm_uuid}.jsonl"
     shutil.copy(FIXTURES / "synthetic-session-basic.jsonl", out_a)
     shutil.copy(FIXTURES / "synthetic-session-multi-model.jsonl", out_b)
 
+    sub_dir = proj_a / basic_uuid / "subagents"
+    sub_dir.mkdir(parents=True)
+    out_sub = sub_dir / f"{sub_id}.jsonl"
+    shutil.copy(FIXTURES / "synthetic-subagent.jsonl", out_sub)
+
     older = time.time() - 60
-    for p in (out_a, out_b):
+    for p in (out_a, out_b, out_sub):
         os.utime(p, (older, older))
 
     return src
@@ -128,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         step("materialize synthetic source")
         source = materialize_source(tmp)
 
-        step("first ingest deposits both fixture sessions")
+        step("first ingest deposits two top-level sessions and one subagent")
         result = run_script(
             REPO_ROOT / "scripts" / "ingest.py",
             "--archive", str(archive),
@@ -138,11 +144,20 @@ def main(argv: list[str] | None = None) -> int:
             print(result.stdout)
             print(result.stderr, file=sys.stderr)
         expect(result.returncode == 0, f"ingest.py returncode={result.returncode}: {result.stderr}")
-        expect("new=2" in result.stdout, f"expected new=2 in output:\n{result.stdout}")
+        expect("new=3" in result.stdout, f"expected new=3 in output:\n{result.stdout}")
 
         sessions_dir = archive / "sessions"
         deposits = sorted(p for p in sessions_dir.rglob("transcript.jsonl"))
-        expect(len(deposits) == 2, f"expected 2 deposits, got {len(deposits)}")
+        expect(len(deposits) == 3, f"expected 3 deposits (2 top-level + 1 subagent), got {len(deposits)}")
+
+        step("subagent is nested under its parent's archive directory")
+        sub_paths = sorted(sessions_dir.rglob("subagents/*/transcript.jsonl"))
+        expect(len(sub_paths) == 1, f"expected 1 subagent deposit, got {len(sub_paths)}")
+        sub_manifest = json.loads(sub_paths[0].with_name("manifest.json").read_text())
+        expect(
+            sub_manifest.get("parent_session_id") == "00000000-0000-4000-8000-000000000001",
+            f"subagent manifest parent_session_id wrong: {sub_manifest.get('parent_session_id')}",
+        )
 
         step("manifest SHA-256 matches the deposited transcript")
         for tr in deposits:
@@ -176,21 +191,33 @@ def main(argv: list[str] | None = None) -> int:
         expect(basic_manifest["has_tool_use"] is True, "tool_use not detected in basic fixture")
         expect(basic_manifest["has_thinking"] is True, "thinking not detected in basic fixture")
 
-        step("git history has two deposit commits")
+        step("git history has three deposit commits")
         log = subprocess.run(
             ["git", "-C", str(archive), "log", "--oneline"],
             capture_output=True, text=True, check=True,
         )
         deposit_lines = [ln for ln in log.stdout.strip().split("\n") if "deposit:" in ln]
-        expect(len(deposit_lines) == 2, f"expected 2 deposit commits, got {len(deposit_lines)}\n{log.stdout}")
+        expect(len(deposit_lines) == 3, f"expected 3 deposit commits, got {len(deposit_lines)}\n{log.stdout}")
+        sub_commits = [ln for ln in deposit_lines if "/subagents/" in ln]
+        expect(len(sub_commits) == 1, f"expected 1 subagent commit, got {len(sub_commits)}")
 
-        step("SQLite index has both sessions and is FTS-queryable")
+        step("SQLite index has all three sessions and is FTS-queryable")
         index_path = archive / ".holotype" / "index.sqlite"
         expect(index_path.exists(), "index.sqlite not created")
         conn = sqlite3.connect(index_path)
         try:
             n_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            expect(n_sessions == 2, f"expected 2 sessions in index, got {n_sessions}")
+            expect(n_sessions == 3, f"expected 3 sessions in index, got {n_sessions}")
+
+            n_with_parent = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL"
+            ).fetchone()[0]
+            expect(n_with_parent == 1, f"expected 1 row with parent_session_id, got {n_with_parent}")
+
+            quasi = conn.execute(
+                "SELECT session_id FROM messages_fts WHERE messages_fts MATCH 'quasicrystal' LIMIT 5"
+            ).fetchall()
+            expect(len(quasi) > 0, "FTS query for 'quasicrystal' (subagent content) returned no hits")
 
             n_msgs = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             expect(n_msgs > 0, "no messages in index")
@@ -218,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.verbose:
             print(result.stdout)
-        expect("new=0" in result.stdout and "unchanged=2" in result.stdout,
+        expect("new=0" in result.stdout and "unchanged=3" in result.stdout,
                f"second ingest was not a no-op:\n{result.stdout}")
         expect(result.returncode == 1, "no-op ingest should exit 1 (no changes)")
 

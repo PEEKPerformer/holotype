@@ -44,9 +44,10 @@ def find_archive(explicit: Path | None) -> Path:
 
 
 def resolve_session(archive: Path, prefix: str) -> tuple[str, Path] | None:
-    """Find the session whose UUID starts with the given prefix.
+    """Find the session whose ID starts with the given prefix.
 
-    Returns (full_session_id, session_dir) or None if not found or ambiguous.
+    Searches both top-level sessions and nested subagents. Returns
+    (full_session_id, session_dir) or None if not found or ambiguous.
     """
     sessions_root = archive / "sessions"
     if not sessions_root.exists():
@@ -57,8 +58,15 @@ def resolve_session(archive: Path, prefix: str) -> tuple[str, Path] | None:
         if not proj.is_dir():
             continue
         for sess in proj.iterdir():
-            if sess.is_dir() and sess.name.startswith(prefix):
+            if not sess.is_dir():
+                continue
+            if sess.name.startswith(prefix) and (sess / "manifest.json").exists():
                 matches.append(sess)
+            sub_root = sess / "subagents"
+            if sub_root.is_dir():
+                for sub in sub_root.iterdir():
+                    if sub.is_dir() and sub.name.startswith(prefix) and (sub / "manifest.json").exists():
+                        matches.append(sub)
 
     if not matches:
         return None
@@ -68,8 +76,7 @@ def resolve_session(archive: Path, prefix: str) -> tuple[str, Path] | None:
             sys.stderr.write(f"  {m.name}\n")
         return None
 
-    sess = matches[0]
-    return (sess.name, sess)
+    return (matches[0].name, matches[0])
 
 
 def render_markdown(transcript: Path) -> str:

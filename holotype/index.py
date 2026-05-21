@@ -18,7 +18,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -39,15 +39,19 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS sessions (
-            session_id      TEXT PRIMARY KEY,
-            project_dir     TEXT,
-            first_ts        TEXT,
-            last_ts         TEXT,
-            message_count   INTEGER,
-            sha256          TEXT,
-            deposited_at    TEXT,
-            git_commit      TEXT
+            session_id        TEXT PRIMARY KEY,
+            parent_session_id TEXT,
+            project_dir       TEXT,
+            first_ts          TEXT,
+            last_ts           TEXT,
+            message_count     INTEGER,
+            sha256            TEXT,
+            deposited_at      TEXT,
+            git_commit        TEXT
         );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_parent
+            ON sessions(parent_session_id);
 
         CREATE TABLE IF NOT EXISTS messages (
             session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -159,22 +163,25 @@ def upsert_session(
     sha256: str,
     deposited_at: str,
     git_commit: str | None,
+    parent_session_id: str | None = None,
 ) -> None:
     conn.execute(
         """
-        INSERT INTO sessions(session_id, project_dir, first_ts, last_ts,
-                             message_count, sha256, deposited_at, git_commit)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions(session_id, parent_session_id, project_dir,
+                             first_ts, last_ts, message_count, sha256,
+                             deposited_at, git_commit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
-            project_dir   = excluded.project_dir,
-            first_ts      = excluded.first_ts,
-            last_ts       = excluded.last_ts,
-            message_count = excluded.message_count,
-            sha256        = excluded.sha256,
-            deposited_at  = excluded.deposited_at,
-            git_commit    = excluded.git_commit
+            parent_session_id = excluded.parent_session_id,
+            project_dir       = excluded.project_dir,
+            first_ts          = excluded.first_ts,
+            last_ts           = excluded.last_ts,
+            message_count     = excluded.message_count,
+            sha256            = excluded.sha256,
+            deposited_at      = excluded.deposited_at,
+            git_commit        = excluded.git_commit
         """,
-        (session_id, project_dir, first_ts, last_ts,
+        (session_id, parent_session_id, project_dir, first_ts, last_ts,
          message_count, sha256, deposited_at, git_commit),
     )
 

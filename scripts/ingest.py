@@ -98,22 +98,39 @@ def candidate_sources(config: dict, explicit: Path | None) -> list[Path]:
 
 
 def walk_jsonls(source: Path):
-    """Yield (project_dir_encoded, jsonl_path) for top-level session JSONLs.
+    """Yield (project_dir_encoded, jsonl_path, parent_session_id) for every
+    deposit candidate in the source — top-level sessions AND the subagent
+    JSONLs spawned from them.
 
-    A top-level session JSONL is `<source>/<project_dir>/<uuid>.jsonl`.
-    We deliberately do NOT recurse into subagents/ — subagent transcripts
-    are referenced by their parent session and are picked up by the
-    fts-content of the parent if relevant. We can revisit this in a
-    Phase 2 (depositing subagents as nested sessions).
+    Filesystem shape from Claude Code:
+        <source>/<project_dir>/<session-uuid>.jsonl                    (top-level)
+        <source>/<project_dir>/<session-uuid>/subagents/<sub>.jsonl    (subagent)
+
+    For top-level sessions we yield parent_session_id=None.
+    For subagents we yield the parent UUID extracted from the path so the
+    deposit can be routed under the parent in the archive layout.
+
+    Subagent transcripts must be deposited because they contain Claude's
+    actual reasoning during delegated work — parent transcripts only record
+    "I spawned an agent with this prompt", not the agent's conversation.
     """
     if not source.exists():
         return
     for project_dir in sorted(source.iterdir()):
         if not project_dir.is_dir() or project_dir.name.startswith("."):
             continue
+
         for jsonl in sorted(project_dir.glob("*.jsonl")):
             if jsonl.is_file():
-                yield project_dir.name, jsonl
+                yield project_dir.name, jsonl, None
+
+        for parent_dir in sorted(p for p in project_dir.iterdir() if p.is_dir()):
+            subagents_dir = parent_dir / "subagents"
+            if not subagents_dir.is_dir():
+                continue
+            for sub_jsonl in sorted(subagents_dir.glob("*.jsonl")):
+                if sub_jsonl.is_file():
+                    yield project_dir.name, sub_jsonl, parent_dir.name
 
 
 def is_live_file(path: Path) -> bool:
@@ -142,13 +159,34 @@ def read_with_stable_check(path: Path) -> bytes | None:
     return data
 
 
-def session_archive_dir(archive: Path, project_dir_encoded: str, session_id: str) -> Path:
-    return archive / "sessions" / project_dir_encoded / session_id
+def session_archive_dir(
+    archive: Path,
+    project_dir_encoded: str,
+    session_id: str,
+    parent_session_id: str | None = None,
+) -> Path:
+    """Resolve the on-disk location of a session inside the archive.
+
+    Top-level sessions live at sessions/<project>/<session-id>/.
+    Subagents live nested under their parent at
+    sessions/<project>/<parent-id>/subagents/<sub-id>/ — this keeps the
+    parent-subagent relationship visible in the filesystem and makes a
+    citable bundle of a parent session naturally include its subagents.
+    """
+    base = archive / "sessions" / project_dir_encoded
+    if parent_session_id is None:
+        return base / session_id
+    return base / parent_session_id / "subagents" / session_id
 
 
-def existing_sha256(archive: Path, project_dir_encoded: str, session_id: str) -> str | None:
+def existing_sha256(
+    archive: Path,
+    project_dir_encoded: str,
+    session_id: str,
+    parent_session_id: str | None = None,
+) -> str | None:
     """If this session is already deposited, return its recorded SHA-256."""
-    manifest_path = session_archive_dir(archive, project_dir_encoded, session_id) / "manifest.json"
+    manifest_path = session_archive_dir(archive, project_dir_encoded, session_id, parent_session_id) / "manifest.json"
     if not manifest_path.exists():
         return None
     try:
@@ -174,6 +212,7 @@ def deposit_one(
     archive: Path,
     project_dir_encoded: str,
     jsonl_path: Path,
+    parent_session_id: str | None,
     *,
     verbose: bool,
 ) -> tuple[str, str]:
@@ -193,11 +232,11 @@ def deposit_one(
     if not data.strip():
         return ("skipped-empty", session_id)
 
-    dest_dir = session_archive_dir(archive, project_dir_encoded, session_id)
+    dest_dir = session_archive_dir(archive, project_dir_encoded, session_id, parent_session_id)
     dest_jsonl = dest_dir / "transcript.jsonl"
     dest_manifest = dest_dir / "manifest.json"
 
-    prior_sha = existing_sha256(archive, project_dir_encoded, session_id)
+    prior_sha = existing_sha256(archive, project_dir_encoded, session_id, parent_session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     tmp_jsonl = dest_jsonl.with_suffix(".jsonl.partial")
@@ -215,6 +254,7 @@ def deposit_one(
         holotype_version=__version__,
         source_path=str(jsonl_path),
         env=env,
+        parent_session_id=parent_session_id,
     )
 
     if prior_sha == manifest.sha256:
@@ -232,11 +272,15 @@ def commit_deposit(
     project_dir_encoded: str,
     session_id: str,
     status: str,
+    parent_session_id: str | None,
 ) -> str | None:
     """Stage and commit one deposit. Returns the new commit's short SHA, or
     None if there was nothing to commit (which should be rare given the
     caller filters)."""
-    rel = f"sessions/{project_dir_encoded}/{session_id}"
+    if parent_session_id is None:
+        rel = f"sessions/{project_dir_encoded}/{session_id}"
+    else:
+        rel = f"sessions/{project_dir_encoded}/{parent_session_id}/subagents/{session_id}"
     run_git(archive, "add", rel)
 
     diff = run_git(archive, "diff", "--cached", "--quiet")
@@ -244,7 +288,7 @@ def commit_deposit(
         return None
 
     verb = "deposit" if status == "new" else "update"
-    msg = f"{verb}: {project_dir_encoded}/{session_id}"
+    msg = f"{verb}: {rel}"
     out = run_git(archive, "commit", "-m", msg)
     if out.returncode != 0:
         sys.stderr.write(out.stderr)
@@ -256,11 +300,13 @@ def update_index(
     archive: Path,
     project_dir_encoded: str,
     session_id: str,
+    parent_session_id: str | None,
     git_commit: str | None,
 ) -> None:
     index_path = archive / ".holotype" / "index.sqlite"
-    transcript = session_archive_dir(archive, project_dir_encoded, session_id) / "transcript.jsonl"
-    manifest_path = session_archive_dir(archive, project_dir_encoded, session_id) / "manifest.json"
+    sess_dir = session_archive_dir(archive, project_dir_encoded, session_id, parent_session_id)
+    transcript = sess_dir / "transcript.jsonl"
+    manifest_path = sess_dir / "manifest.json"
     if not (transcript.exists() and manifest_path.exists()):
         return
 
@@ -270,6 +316,7 @@ def update_index(
         upsert_session(
             conn,
             session_id=session_id,
+            parent_session_id=parent_session_id,
             project_dir=project_dir_encoded,
             first_ts=manifest.get("first_timestamp"),
             last_ts=manifest.get("last_timestamp"),
@@ -324,20 +371,24 @@ def main(argv: list[str] | None = None) -> int:
         committed: list[str] = []
 
         for source in sources:
-            for project_dir_encoded, jsonl_path in walk_jsonls(source):
+            for project_dir_encoded, jsonl_path, parent_session_id in walk_jsonls(source):
                 if args.dry_run:
                     counts["new"] += 1  # rough proxy in dry-run mode
                     continue
 
                 status, session_id = deposit_one(
-                    archive, project_dir_encoded, jsonl_path, verbose=not args.quiet
+                    archive, project_dir_encoded, jsonl_path,
+                    parent_session_id, verbose=not args.quiet,
                 )
                 counts[status] = counts.get(status, 0) + 1
 
                 if status in ("new", "updated"):
-                    commit = commit_deposit(archive, project_dir_encoded, session_id, status)
-                    update_index(archive, project_dir_encoded, session_id, commit)
-                    committed.append(f"  {status:>8s}  {project_dir_encoded}/{session_id[:8]}")
+                    commit = commit_deposit(archive, project_dir_encoded,
+                                            session_id, status, parent_session_id)
+                    update_index(archive, project_dir_encoded, session_id,
+                                 parent_session_id, commit)
+                    tag = f"{parent_session_id[:8]}/subagents/{session_id[:8]}" if parent_session_id else session_id[:8]
+                    committed.append(f"  {status:>8s}  {project_dir_encoded}/{tag}")
 
         any_changes = counts["new"] + counts["updated"] > 0
         if not args.quiet or any_changes:
