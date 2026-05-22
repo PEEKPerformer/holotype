@@ -2,6 +2,20 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] — 2026-05-22
+
+### Changed
+
+- **Wizard Step 9b — first ingest now drives a Monitor for live progress.** Previously the wizard kicked off `ingest.py` as a background bash task and went silent until the harness notified on completion. For a 5–30 min first ingest that's a bad UX — the user has no signal that anything is happening.
+
+  The new spec: launch the ingest in the background AND immediately arm a Monitor that counts deposited manifests every 15 seconds, emitting one event per 500-deposit milestone plus a COMPLETE event when ingest exits. Counts *manifests* not commits so the progress signal works for both per-session ingests AND `--bulk-initial` (where commits are deferred to one combined commit at the end; manifests are written eagerly).
+
+  Subsequent (steady-state, post-first-ingest) cycles don't need a Monitor — they finish fast enough that background-task-then-notify is fine. Launchd / systemd tick ingests log to disk and don't drive a Monitor either.
+
+- **Wizard Step 9c — post-ingest validation.** New numbered sub-step. After the Monitor COMPLETE event fires, the wizard runs three sanity checks: per-source session counts, full `verify.py` hash-chain check, and a confirmation that the bulk-initial commit pushed to the remote (if auto-push is on). Closes the wizard loop with the canonical "setup done, archive healthy" moment.
+
+---
+
 ## [1.1.3] — 2026-05-22
 
 ### Added

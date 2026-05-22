@@ -271,12 +271,65 @@ Then offer the user a choice about commit topology for THIS first ingest:
 
 If they pick bulk-initial, pass the `--bulk-initial` flag.
 
-**Step 9b — First ingest.** Run the initial deposit:
+**Step 9b — First ingest, with live progress.** Run the initial deposit AS A BACKGROUND TASK and arm a Monitor that emits per-milestone events plus one completion event. Do NOT just `Bash run_in_background` and go silent — for a 5-30 minute ingest the user wants progress feedback.
+
+Kick off the ingest in the background:
+
 ```bash
 python scripts/ingest.py --archive <abs-path> [--bulk-initial]
 ```
 
-Report the count of sessions deposited.
+Immediately arm a Monitor with the following script. Counts deposited *manifests* (not commits) so the progress signal works for both per-session and `--bulk-initial` modes (manifests are written eagerly by `deposit_one()`; commits are deferred under `--bulk-initial`):
+
+```bash
+archive=<abs-path>
+start_ts=$(date +%s)
+start_files=$(find "$archive/sessions" -name manifest.json 2>/dev/null | wc -l | tr -d ' ')
+last_milestone=0
+while pgrep -f "scripts/ingest.py" > /dev/null; do
+  cur=$(find "$archive/sessions" -name manifest.json 2>/dev/null | wc -l | tr -d ' ')
+  delta=$((cur - start_files))
+  if [ "$delta" -ge "$((last_milestone + 500))" ]; then
+    elapsed=$(( $(date +%s) - start_ts ))
+    rate=$((delta * 60 / (elapsed + 1)))
+    echo "$(date +%H:%M:%S) milestone: manifests=$cur (+$delta) rate=${rate}/min elapsed=${elapsed}s"
+    last_milestone=$((last_milestone + 500))
+  fi
+  sleep 15
+done
+final=$(find "$archive/sessions" -name manifest.json 2>/dev/null | wc -l | tr -d ' ')
+elapsed=$(( $(date +%s) - start_ts ))
+echo "$(date +%H:%M:%S) COMPLETE: final manifests=$final (+$((final - start_files))) elapsed=${elapsed}s"
+```
+
+Set the Monitor `timeout_ms` to 3600000 (the maximum, 60 min) for a typical first ingest. Pick `description` like "holotype first-ingest progress (one event per ~500 deposits)" — that string appears in every notification the user sees.
+
+Each milestone event tells the user "we're alive, depositing at N/min, at K total." The COMPLETE event signals the cycle is over. When the Monitor notification fires, run the validation checks (Step 9c).
+
+For *subsequent* ingests (steady-state, after the first one) the Monitor is unnecessary — those typically finish in seconds-to-minutes for a normal daily delta. Background-tick ingests don't need a Monitor either; they're fire-and-forget and write to `~/Library/Logs/holotype-ingest.{out,err}` (or the launchd-configured paths).
+
+**Step 9c — Post-ingest validation.** After the Monitor's COMPLETE event fires, sanity-check the result:
+
+```bash
+# Counts by source
+python -c "
+from holotype.archive import iter_all_sessions
+from pathlib import Path
+counts = {}
+for _, m in iter_all_sessions(Path('<abs-path>')):
+    counts[m.get('source','?')] = counts.get(m.get('source','?'),0) + 1
+print('by source:', counts)
+"
+
+# Full hash-chain verify
+python scripts/verify.py --archive <abs-path>
+
+# Confirm the remote has the bulk-initial commit
+git -C <abs-path> log --oneline origin/main..HEAD 2>/dev/null || \
+  git -C <abs-path> log --oneline -3
+```
+
+Report the per-source counts, the verify summary, and (if a remote is configured) confirm the push landed. This is the canonical "setup done, archive is healthy" moment.
 
 **Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes, yes" to each. The point is informed consent on the storage cost, the remote decision, and on modifying the host CLI's settings — not speed.
 
