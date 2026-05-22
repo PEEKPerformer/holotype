@@ -2,6 +2,18 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] — 2026-05-22
+
+### Added
+
+- **Wizard Step 7a — Back up the git-crypt key.** New numbered step between host-retention check and launchd opt-in. Fires only when `config.deposit.encrypt_transcripts` is true. Drives the key-backup conversation BEFORE launchd (which would auto-push) and BEFORE the first ingest — closing the window where encrypted blobs could ship to the remote while the only key copy still lives on a single disk.
+
+  The step detects candidate destinations on the user's machine — iCloud Drive root, Dropbox, Google Drive, OneDrive, 1Password CLI (`op` binary), `~/Documents/` *only if* iCloud "Desktop & Documents" sync is detected — and offers them in priority order with a custom-path escape hatch. Recognized cloud-synced destinations are confirmed as "genuinely offsite"; same-disk paths are surfaced as "this is NOT a real backup" without ambiguity.
+
+  Driven by the second cold-start end-to-end run: the previous wizard improvised this step ad-hoc and shipped the user a same-disk export with a "now you move it" instruction. The improvised step also got the `git-crypt` invocation wrong on first attempt (`git -C ... git-crypt export-key` — git-crypt is a top-level command). Pinning the step + the correct syntax + the cloud-sync detection so future wizard runs don't improvise.
+
+---
+
 ## [1.1.2] — 2026-05-22
 
 Wizard recommendation reframe — no behavioral default change.

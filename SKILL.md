@@ -187,6 +187,54 @@ python scripts/configure-host-retention.py
 
 If the script reports `already-ok` or `skipped-not-installed`, no action needed.
 
+**Step 7a — Back up the git-crypt key (only if encryption is on).** Skip this step if `config.deposit.encrypt_transcripts` is false. Otherwise, drive the key-backup conversation now — *before* the launchd tick is installed and *before* the first ingest pushes encrypted blobs to the remote. The key was created by `init.py` at `<archive>/.git/git-crypt/keys/default`. It exists nowhere else. If this disk dies before the key is backed up, every encrypted deposit on the remote becomes permanently unrecoverable.
+
+State the situation explicitly:
+
+> "init created the git-crypt key at `<archive>/.git/git-crypt/keys/default`. That's the ONLY copy. Before the first ingest pushes encrypted blobs to GitHub, you should back it up to at least one offsite location. Where would you like to export it?"
+
+Detect candidate destinations on the user's machine BEFORE offering options:
+
+```bash
+# macOS iCloud Drive root
+test -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs" && echo iCloud_root
+# Desktop & Documents sync indicator (macOS iCloud Drive option)
+test -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents" && echo iCloud_documents
+# Other common cloud syncs
+test -d "$HOME/Dropbox" && echo dropbox
+test -d "$HOME/Google Drive" -o -d "$HOME/Library/CloudStorage/GoogleDrive-${USER}@gmail.com" && echo gdrive
+test -d "$HOME/OneDrive" && echo onedrive
+# 1Password CLI
+command -v op >/dev/null && echo op_cli
+```
+
+Offer destinations in this rough priority, presenting only those whose detection succeeded plus the manual-path option:
+
+- **1Password CLI (`op`)** — best for archives destined for paper citation; the key is stored as a secure note. After export, the local file should be shredded. Run: `git-crypt export-key /tmp/holotype-keyfile.key && op item create --category=password --title="holotype git-crypt key (<archive-name>)" --vault=Private holotype_key="$(base64 -i /tmp/holotype-keyfile.key)" && rm -P /tmp/holotype-keyfile.key`.
+- **iCloud Drive** — `~/Library/Mobile Documents/com~apple~CloudDocs/holotype-keyfile.key`. macOS encrypts in transit + at rest in iCloud. Counts as offsite automatically.
+- **Dropbox / Google Drive / OneDrive** — same idea, the user's chosen cloud sync.
+- **~/Documents/holotype-keyfile.key** — *only if iCloud Drive's "Desktop & Documents" sync is on* (detect via `iCloud_documents` above). Surface this explicitly: "Your `~/Documents/` is iCloud-synced; exporting here is automatically offsite." If iCloud Documents sync isn't on, downgrade this option (`~/Documents/` becomes "local disk only — move it elsewhere later").
+- **Custom path you provide** — the user types a path (e.g. an external USB drive mountpoint).
+- **Skip — I'll back it up myself** — last resort. Print the exact command for the user to run later: `cd <archive> && git-crypt export-key /path/to/your/backup-keyfile.key`.
+
+Run the export with the correct invocation (git-crypt is a top-level command, not a `git` subcommand):
+
+```bash
+cd <archive>
+git-crypt export-key <destination-path>
+chmod 0600 <destination-path>
+```
+
+After export, verify the file mode is 0600 and confirm whether the destination is genuinely offsite. If the destination is on the local disk only (not in any recognized cloud-sync location and not on a separate physical volume), surface this to the user honestly:
+
+> "Exported to `<path>`. This is on the same disk as the archive — it is NOT a real backup. If this disk dies, both the key and the encrypted remote become inaccessible. Move it to a cloud-synced folder, external drive, or password manager before depending on the archive for citation."
+
+If the destination IS in a recognized cloud-sync location (or 1Password CLI), confirm:
+
+> "Exported to `<path>` — this location is offsite-synced, so the key now exists on multiple physical devices. You're good. Refer to `<archive>/HOW_TO_BACK_UP_YOUR_KEY.md` for adding collaborators or a second backup destination."
+
+Either way, point the user at the archive's `HOW_TO_BACK_UP_YOUR_KEY.md` for the canonical reference (it covers `git-crypt export-key` syntax, recovery testing via `git clone` + `git-crypt unlock`, and adding collaborators via `git-crypt add-gpg-user`).
+
 **Step 8 — Background-tick opt-in (macOS only).** Ask:
 
 > "Claude Code / Codex sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses by running `ingest.py` on a timer.
