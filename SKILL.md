@@ -41,7 +41,24 @@ python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-ki
 
 The script writes `<archive>/.holotype/config.json`, drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive.
 
-**Step 6 — Background-tick opt-in (macOS only).** Ask:
+**Step 6 — Host-CLI retention check.** Holotype's forensic-completeness promise has a hole if the host CLI prunes session transcripts before holotype can deposit them. Claude Code's default `cleanupPeriodDays` is 30; we want effectively-never. Run:
+
+```bash
+python scripts/configure-host-retention.py --check-only
+```
+
+If the script reports `would-update`, ask:
+
+> "Claude Code is set to delete session transcripts after N days. Holotype can't deposit what's been deleted. Bump retention to ~100 years (the canonical 'never prune' value)? (Y/n)"
+
+If yes:
+```bash
+python scripts/configure-host-retention.py
+```
+
+If the script reports `already-ok` or `skipped-not-installed`, no action needed.
+
+**Step 7 — Background-tick opt-in (macOS only).** Ask:
 
 > "Claude Code sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses. It is local-only and never pushes to a remote. Install? (Y/n)"
 
@@ -52,14 +69,14 @@ python scripts/install-launchd.py --archive <abs-path>
 
 If on Linux or Windows, skip this step and tell the user the equivalent can be set up later via systemd user unit (Linux) or Task Scheduler (Windows).
 
-**Step 7 — First ingest.** Run an initial deposit to seed the archive from the existing rsync backup:
+**Step 8 — First ingest.** Run an initial deposit to seed the archive from the existing host-CLI session stores:
 ```bash
 python scripts/ingest.py --archive <abs-path>
 ```
 
 Report the count of sessions deposited.
 
-**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes" to each. The point is informed consent on the remote decision, not speed.
+**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes, yes" to each. The point is informed consent on the remote decision and on modifying the host CLI's settings, not speed.
 
 ## Where things live (after setup)
 
@@ -95,6 +112,7 @@ Read these before any operation:
 | Want to... | Run |
 |------------|-----|
 | First-time setup | Conduct wizard, then `python scripts/init.py --path <p> --remote-url <u> --remote-kind <k>` |
+| Check / bump host-CLI retention | `python scripts/configure-host-retention.py [--check-only]` |
 | Install macOS background tick (after setup) | `python scripts/install-launchd.py --archive <p>` |
 | Deposit new sessions (preferred — from the rsync backup) | `python scripts/ingest.py --source ~/Documents/Claude-Backups` |
 | Deposit directly from live Claude Code state | `python scripts/ingest.py --source ~/.claude/projects` |
