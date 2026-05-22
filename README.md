@@ -230,11 +230,15 @@ Active development. See [CHANGELOG.md](CHANGELOG.md) for the version history. Si
 
 ## How to cite
 
-If you use `holotype` in research that you publish, please cite both the software and the deposited session bundles.
+Cite `holotype` if your paper relies on it in a load-bearing way:
 
-The repository's [`CITATION.cff`](CITATION.cff) provides machine-readable metadata. GitHub renders a "Cite this repository" button on the repo page that picks up the same metadata in APA / BibTeX form.
+- You used it to produce the session transcripts that your paper's Data Availability Statement cites.
+- You used `paper_bundle.py` to package transcripts for Zenodo deposit.
+- You used `verify.py`, the manifest schema, or any other holotype output as evidence in your Methods.
 
-The canonical software DOI is minted by Zenodo via the GitHub-Zenodo integration on each tagged release. Cite the **version DOI** for the specific release your work depended on, not the concept DOI (which tracks the latest version). See [docs/PUBLISHING_TO_ZENODO.md](docs/PUBLISHING_TO_ZENODO.md) for the parallel guidance on citing individual deposited sessions from a paper's Data Availability Statement.
+You don't need to cite it for casual install / inspection.
+
+[`CITATION.cff`](CITATION.cff) carries the machine-readable metadata (GitHub renders a "Cite this repository" button). Cite the **version DOI** of the release your work used, not the concept DOI which tracks latest. See [docs/PUBLISHING_TO_ZENODO.md](docs/PUBLISHING_TO_ZENODO.md) for citing individual session bundles from a DAS.
 
 ## AI assistance disclosure
 
