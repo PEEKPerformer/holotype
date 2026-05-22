@@ -1,5 +1,7 @@
 # holotype
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20349311.svg)](https://doi.org/10.5281/zenodo.20349311)
+
 Forensic-grade archival of LLM-driven agent CLI sessions for scientific reproducibility — packaged as an [agent skill](https://agentskills.io) with bundled Python scripts.
 
 > *holotype, n. (taxonomy) — The single physical specimen used when a species is formally described. Every later observation is compared against it.*

@@ -9,6 +9,11 @@ authors:
     email: brendenferland@gmail.com
 repository-code: "https://github.com/PEEKPerformer/holotype"
 url: "https://github.com/PEEKPerformer/holotype"
+doi: "10.5281/zenodo.20349311"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.20349311"
+    description: "Zenodo software DOI (v2.0.2)"
 abstract: >-
   holotype is an agent-CLI-agnostic provenance tool that deposits LLM
   session transcripts (Claude Code, Codex, Google Antigravity, and
