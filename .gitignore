@@ -42,9 +42,10 @@ htmlcov/
 # machine.
 /memory/
 
-# Local Claude Code per-project overrides (already gitignored
-# convention, but be explicit here too).
+# Local Claude Code per-project overrides + runtime artifacts.
 /.claude/settings.local.json
+/.claude/scheduled_tasks.lock
+/.claude/scheduled_tasks/
 
 # Stray Antigravity CLI project pointer (auto-created when the user
 # opens this dir in Antigravity — symlinks into ~/.gemini/).
