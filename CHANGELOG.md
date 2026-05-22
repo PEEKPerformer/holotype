@@ -49,7 +49,10 @@ First public release. The substrate that makes Digital Discovery's LLM-DAS requi
 - `scripts/selftest.py` — ~30 end-to-end checks covering every source, both compression modes, paper bundle, and verify.
 
 #### Index
-- SQLite + FTS5 derived index at `<archive>/.holotype/index.sqlite`. Schema version 3 (sessions / messages / messages_fts). Rebuildable on demand; never the source of truth.
+- SQLite + FTS5 derived index at `<archive>/.holotype/index.sqlite`. Schema version 4 (sessions / messages / messages_fts). Rebuildable on demand; never the source of truth.
+- **Perf**: ingest holds a single SQLite connection across the cycle (vs. one open-per-session in earlier drafts), uses `executemany()` for batch line inserts, batches `COMMIT` per 50 sessions, and sets `synchronous=NORMAL` + 64 MiB cache. Skips the FTS rebuild when the on-disk transcript bytes haven't changed — the dominant case for a manifest-version migration. Together these turn a previously-multi-hour bulk re-ingest into minutes for a 6000-session archive.
+- **Combined "migrate:" commits for manifest-only refreshes.** When a manifest-version bump fires the re-process path but the on-disk transcript bytes are unchanged, every affected session would have produced its own "update:" commit under the old per-session-commit rule — for a 6000-session migration that's 6000 commits saying nothing useful. The new behavior emits exactly one `migrate: refresh N manifest(s) to schema v<V> [<sources>]` commit covering the whole batch. Genuine deposits and content updates still get per-session commits as before — only the "schema bump, bytes identical" case bundles. `git log sessions/<X>/<Y>/manifest.json` still finds the migration; the file shares the commit with its siblings instead of holding its own.
+- The `messages.raw_json` column was removed in schema v4: it duplicated the canonical JSONL on disk and ballooned the index multi-GB without serving any query the FTS table didn't already cover.
 
 #### Skill
 - `SKILL.md` with `disable-model-invocation: true` (Anthropic standard) and `agents/openai.yaml` with `policy.allow_implicit_invocation: false` (OpenAI standard). User-invocable only; the skill is never auto-triggered.

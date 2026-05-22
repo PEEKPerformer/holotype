@@ -501,6 +501,51 @@ def main(argv: list[str] | None = None) -> int:
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, f"three-source verify failed: {result.stderr}")
 
+        step("manifest-version migration is bundled into ONE combined commit")
+        # Hand-edit one of the synthetic deposits' manifest to look stale
+        # (manifest_version downgraded). Re-ingest. Confirm exactly one
+        # `migrate:` commit covers it, not a per-session `update:` commit.
+        mig_target = next(
+            p for p in (archive / "sessions").rglob("manifest.json")
+            if "antigravity" not in str(p) and "codex" not in str(p)
+            and "/subagents/" not in str(p)
+        )
+        mig_data = json.loads(mig_target.read_text())
+        mig_data["manifest_version"] = 3  # pretend it's a stale schema
+        mig_target.write_text(json.dumps(mig_data, indent=2, sort_keys=True) + "\n")
+        # Commit the rigged manifest so the next ingest sees it as the prior state.
+        subprocess.run(["git", "-C", str(archive), "add", str(mig_target.relative_to(archive))],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(archive), "commit", "-q", "-m", "test: downgrade one manifest to v3"],
+                       check=True, capture_output=True)
+
+        before_log = subprocess.run(
+            ["git", "-C", str(archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        before_count = len(before_log.strip().split("\n"))
+
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(archive),
+            "--source", str(source),
+        )
+        if args.verbose:
+            print(result.stdout)
+        expect(result.returncode == 0, f"migration ingest failed: {result.stderr}")
+
+        after_log = subprocess.run(
+            ["git", "-C", str(archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        new_commits = after_log.strip().split("\n")[: len(after_log.strip().split("\n")) - before_count]
+        expect(len(new_commits) == 1,
+               f"expected exactly 1 migration commit, got {len(new_commits)}:\n{chr(10).join(new_commits)}")
+        expect("migrate:" in new_commits[0],
+               f"expected `migrate:` prefix on combined commit: {new_commits[0]}")
+        expect("schema v4" in new_commits[0],
+               f"combined commit should mention target schema version: {new_commits[0]}")
+
         step("auto-push: init with a local bare-repo remote and confirm ingest pushes")
         bare_remote = tmp / "bare-remote.git"
         subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True,

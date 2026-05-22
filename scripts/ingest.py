@@ -44,7 +44,12 @@ from holotype import __version__
 from holotype.compression import compress_bytes, transcript_filename
 from holotype.env import claude_code_version, git_state_for_path, platform_info
 from holotype.hashing import sha256_bytes
-from holotype.index import open_index, reindex_session, upsert_session
+from holotype.index import (
+    open_index,
+    reindex_session,
+    session_indexed,
+    upsert_session,
+)
 from holotype.manifest import MANIFEST_VERSION, build_manifest
 from holotype.sources import ALL_SOURCES, source_by_name
 from holotype.sources.base import DepositCandidate, Source
@@ -190,8 +195,14 @@ def deposit_one(
     candidate: DepositCandidate,
     *,
     compression: str | None,
-) -> tuple[str, str]:
-    """Deposit one candidate. Returns (status, session_id).
+) -> tuple[str, str, bool]:
+    """Deposit one candidate. Returns (status, session_id, transcript_changed).
+
+    ``transcript_changed`` is True only when the on-disk transcript bytes
+    differ from the prior deposit (i.e. a real "new" or content-update).
+    For pure manifest-version migrations (the bytes are unchanged but
+    the manifest schema bumped), it's False — the caller can skip
+    expensive FTS rebuilds since the indexed content didn't change.
 
     When ``compression == "zstd"``, the transcript is stored as
     ``transcript.jsonl.zst`` and the manifest records both ``sha256``
@@ -203,13 +214,13 @@ def deposit_one(
     session_id = candidate.session_id
 
     if is_live_file(jsonl_path):
-        return ("skipped-live", session_id)
+        return ("skipped-live", session_id, False)
 
     data = read_with_stable_check(jsonl_path)
     if data is None:
-        return ("skipped-live", session_id)
+        return ("skipped-live", session_id, False)
     if not data.strip():
-        return ("skipped-empty", session_id)
+        return ("skipped-empty", session_id, False)
 
     dest_dir = session_archive_dir(archive, candidate)
     on_disk_name = transcript_filename(compression)
@@ -228,7 +239,9 @@ def deposit_one(
     # behind the "unchanged sha" short-circuit.
     new_sha = sha256_bytes(data)
     if prior_sha == new_sha and prior_version == MANIFEST_VERSION:
-        return ("skipped-unchanged", session_id)
+        return ("skipped-unchanged", session_id, False)
+
+    transcript_changed = (prior_sha != new_sha)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -292,7 +305,7 @@ def deposit_one(
     tmp_manifest.write_text(manifest.to_json())
     os.replace(tmp_manifest, dest_manifest)
 
-    return ("updated" if prior_sha else "new", session_id)
+    return ("updated" if prior_sha else "new", session_id, transcript_changed)
 
 
 def commit_deposit(
@@ -318,15 +331,82 @@ def commit_deposit(
     return git_head_short(archive)
 
 
+def commit_manifest_migration(
+    archive: Path,
+    candidates: list[DepositCandidate],
+    sign_commits: bool = False,
+) -> str | None:
+    """One combined commit for manifest-only refreshes (transcript bytes
+    unchanged — typically a manifest_version schema bump).
+
+    For genuine deposits (new sessions or content updates) we still emit
+    one commit per session via ``commit_deposit``, preserving the
+    granular per-session history. But for schema migrations where the
+    on-disk transcript hasn't changed, emitting N individual "update:"
+    commits is a lie — there's one logical event (the schema bump), not
+    N. Combining them into one commit is faster (avoids N×100ms git
+    overhead) AND more honest about what changed.
+
+    `git log sessions/<X>/<Y>/manifest.json` still finds this commit;
+    the file's history just shares one commit with its siblings instead
+    of having its own.
+    """
+    if not candidates:
+        return None
+
+    rels = [f"sessions/{c.archive_subpath}" for c in candidates]
+    # Stage in one shot. `git add` accepts many paths; we chunk to stay
+    # under argv limits for very large migrations (well above what we'd
+    # ever hit but cheap insurance).
+    CHUNK = 500
+    for i in range(0, len(rels), CHUNK):
+        run_git(archive, "add", *rels[i:i + CHUNK])
+
+    diff = run_git(archive, "diff", "--cached", "--quiet")
+    if diff.returncode == 0:
+        return None
+
+    sources = sorted({c.source_name for c in candidates})
+    src_tag = "+".join(sources) if sources else "?"
+    msg = (
+        f"migrate: refresh {len(candidates)} manifest(s) to schema v"
+        f"{MANIFEST_VERSION} [{src_tag}]\n\n"
+        f"Manifest-only update: on-disk transcript bytes unchanged; new "
+        f"manifest_version fields written. See CHANGELOG for what each "
+        f"version bump added."
+    )
+    commit_args = ["commit", "-m", msg]
+    if sign_commits:
+        commit_args.insert(1, "-S")
+    out = run_git(archive, *commit_args)
+    if out.returncode != 0:
+        sys.stderr.write(out.stderr)
+        return None
+    return git_head_short(archive)
+
+
 def update_index(
+    conn,
     archive: Path,
     source_cls: type[Source],
     candidate: DepositCandidate,
     git_commit: str | None,
+    transcript_changed: bool,
 ) -> None:
+    """Reflect a single deposit into the shared SQLite index.
+
+    Caller owns the connection — one connection per ingest cycle. We
+    don't commit here; the main loop batches commits.
+
+    ``transcript_changed=False`` means the on-disk transcript bytes are
+    unchanged from the prior deposit (e.g. a manifest-version migration).
+    The FTS rows for this session are still correct under that condition,
+    so we skip the expensive DELETE+INSERT rebuild and just refresh the
+    sessions-table row. This is the single biggest perf win for bulk
+    re-ingests triggered by a manifest schema bump.
+    """
     from holotype.compression import find_transcript
 
-    index_path = archive / ".holotype" / "index.sqlite"
     sess_dir = session_archive_dir(archive, candidate)
     found = find_transcript(sess_dir)
     manifest_path = sess_dir / "manifest.json"
@@ -335,22 +415,28 @@ def update_index(
 
     manifest = json.loads(manifest_path.read_text())
 
-    with open_index(index_path) as conn:
-        upsert_session(
-            conn,
-            session_id=candidate.session_id,
-            source=source_cls.name,
-            parent_session_id=candidate.parent_session_id,
-            project_dir=candidate.project_dir_encoded,
-            first_ts=manifest.get("first_timestamp"),
-            last_ts=manifest.get("last_timestamp"),
-            message_count=manifest.get("message_count", 0),
-            sha256=manifest.get("sha256", ""),
-            deposited_at=manifest.get("deposited_at", ""),
-            git_commit=git_commit,
-        )
-        reindex_session(conn, candidate.session_id, sess_dir, source_cls=source_cls)
-        conn.commit()
+    upsert_session(
+        conn,
+        session_id=candidate.session_id,
+        source=source_cls.name,
+        parent_session_id=candidate.parent_session_id,
+        project_dir=candidate.project_dir_encoded,
+        first_ts=manifest.get("first_timestamp"),
+        last_ts=manifest.get("last_timestamp"),
+        message_count=manifest.get("message_count", 0),
+        sha256=manifest.get("sha256", ""),
+        deposited_at=manifest.get("deposited_at", ""),
+        git_commit=git_commit,
+    )
+
+    # Skip FTS rebuild when the transcript bytes haven't changed AND we
+    # already have the per-message rows indexed. Both conditions matter:
+    # if the index was wiped (schema bump or `reindex.py`), we still
+    # need to populate even unchanged transcripts.
+    if not transcript_changed and session_indexed(conn, candidate.session_id):
+        return
+
+    reindex_session(conn, candidate.session_id, sess_dir, source_cls=source_cls)
 
 
 def acquire_lock(archive: Path):
@@ -404,18 +490,81 @@ def main(argv: list[str] | None = None) -> int:
                                   "skipped-unchanged": 0, "skipped-empty": 0}
         committed: list[str] = []
 
-        for source_cls, candidate in candidates:
-            if args.dry_run:
-                counts["new"] += 1
-                continue
+        index_path = archive / ".holotype" / "index.sqlite"
+        # One SQLite connection for the whole cycle (vs. open-per-session
+        # in the old code path, which was the dominant per-session cost
+        # at scale). Commit in batches of INDEX_COMMIT_BATCH sessions to
+        # bound WAL size; the final commit happens in the `finally`
+        # below regardless of how the loop exits.
+        INDEX_COMMIT_BATCH = 50
+        pending_since_commit = 0
 
-            status, session_id = deposit_one(archive, source_cls, candidate, compression=compression)
-            counts[status] = counts.get(status, 0) + 1
+        # Two buckets: real content changes get one git commit each
+        # (granular per-session history). Manifest-only refreshes get
+        # bundled into one combined commit at the end of the cycle —
+        # they share a single logical event ("schema bump") and N
+        # separate commits would be a lie about what changed.
+        migrations: list[tuple[type[Source], DepositCandidate]] = []
 
-            if status in ("new", "updated"):
-                commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
-                update_index(archive, source_cls, candidate, commit)
-                committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
+        with open_index(index_path) as conn:
+            for source_cls, candidate in candidates:
+                if args.dry_run:
+                    counts["new"] += 1
+                    continue
+
+                status, session_id, transcript_changed = deposit_one(
+                    archive, source_cls, candidate, compression=compression
+                )
+                counts[status] = counts.get(status, 0) + 1
+
+                if status not in ("new", "updated"):
+                    continue
+
+                if transcript_changed:
+                    # Genuine deposit or content update — per-session commit.
+                    commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
+                    update_index(
+                        conn, archive, source_cls, candidate, commit,
+                        transcript_changed=True,
+                    )
+                    committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
+                else:
+                    # Manifest-only refresh — defer the git commit; do the
+                    # index work now (cheap because we skip FTS rebuild).
+                    update_index(
+                        conn, archive, source_cls, candidate, git_commit=None,
+                        transcript_changed=False,
+                    )
+                    migrations.append((source_cls, candidate))
+
+                pending_since_commit += 1
+                if pending_since_commit >= INDEX_COMMIT_BATCH:
+                    conn.commit()
+                    pending_since_commit = 0
+
+            # Final batch flush.
+            if pending_since_commit:
+                conn.commit()
+
+        # One combined commit for all manifest-only refreshes. Runs OUTSIDE
+        # the SQLite `with` block so the index is fully committed first —
+        # the git commit is the user-visible record; the index is derived.
+        if migrations:
+            mig_candidates = [c for _, c in migrations]
+            mig_commit = commit_manifest_migration(archive, mig_candidates, sign_commits=sign_commits)
+            if mig_commit:
+                committed.append(
+                    f"  migrate  {len(mig_candidates)} manifest(s) → schema v{MANIFEST_VERSION}"
+                )
+            # Backfill the sessions.git_commit column for the migrated
+            # rows so search/cite still know which commit they belong to.
+            if mig_commit:
+                with open_index(index_path) as conn2:
+                    conn2.executemany(
+                        "UPDATE sessions SET git_commit = ? WHERE session_id = ?",
+                        [(mig_commit, c.session_id) for _, c in migrations],
+                    )
+                    conn2.commit()
 
         any_changes = counts["new"] + counts["updated"] > 0
         if not args.quiet or any_changes:

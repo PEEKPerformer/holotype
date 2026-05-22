@@ -18,7 +18,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-INDEX_SCHEMA_VERSION = 3
+INDEX_SCHEMA_VERSION = 4
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -26,6 +26,15 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    # Trade some crash-durability for speed: synchronous=NORMAL is
+    # widely-recommended for derived-data SQLite that can always be
+    # rebuilt from canonical sources. The git-tracked manifests are
+    # the truth; if this DB is corrupted by a power loss, reindex.py
+    # rebuilds it.
+    conn.execute("PRAGMA synchronous = NORMAL")
+    # Larger cache and temp-in-memory help bulk insert throughput.
+    conn.execute("PRAGMA cache_size = -65536")  # 64 MiB
+    conn.execute("PRAGMA temp_store = MEMORY")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -56,6 +65,11 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_sessions_source
             ON sessions(source);
 
+        -- Per-message metadata. Note: we deliberately do NOT store the
+        -- raw JSONL line here. It's already on disk in the canonical
+        -- transcript.jsonl and re-storing it ballooned the index to
+        -- multiple GB for a moderately-sized archive without serving
+        -- any query the FTS table doesn't already cover.
         CREATE TABLE IF NOT EXISTS messages (
             session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
             sequence    INTEGER NOT NULL,
@@ -66,7 +80,6 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             model       TEXT,
             has_tool_use    INTEGER,
             has_thinking    INTEGER,
-            raw_json    TEXT,
             PRIMARY KEY (session_id, sequence)
         );
 
@@ -170,6 +183,11 @@ def reindex_session(
     Returns the number of message rows written. Note: this is rows
     *indexed*, including session-header pseudo-records — slightly higher
     than what the manifest's `message_count` reports.
+
+    Performance: parses lines into memory then batches INSERTs via
+    ``executemany``. Avoids per-line Python↔C round trips. On a 6000-
+    session bulk re-ingest with the old per-execute pattern this was
+    the dominant bottleneck.
     """
     if source_cls is None:
         from holotype.sources.claude_code import ClaudeCodeSource
@@ -188,7 +206,9 @@ def reindex_session(
                 yield from f
         line_iter = _file_iter()
 
-    n = 0
+    message_rows: list[tuple] = []
+    fts_rows: list[tuple] = []
+
     for sequence, line in enumerate(line_iter):
         info = source_cls.parse_line(line)
         if info is None:
@@ -207,33 +227,53 @@ def reindex_session(
         except json.JSONDecodeError:
             pass
 
-        conn.execute(
-            """INSERT INTO messages(session_id, sequence, uuid, parent_uuid,
-                                    role, timestamp, model, has_tool_use,
-                                    has_thinking, raw_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id,
-                sequence,
-                uuid,
-                parent_uuid,
-                info.role,
-                info.timestamp,
-                info.model,
-                1 if info.has_tool_use else 0,
-                1 if info.has_thinking else 0,
-                line.decode("utf-8", errors="replace").rstrip("\n"),
-            ),
-        )
+        message_rows.append((
+            session_id,
+            sequence,
+            uuid,
+            parent_uuid,
+            info.role,
+            info.timestamp,
+            info.model,
+            1 if info.has_tool_use else 0,
+            1 if info.has_thinking else 0,
+        ))
 
         if info.fts_content:
-            conn.execute(
-                """INSERT INTO messages_fts(content, role, session_id, sequence)
-                   VALUES (?, ?, ?, ?)""",
-                (info.fts_content, info.role or "", session_id, sequence),
+            fts_rows.append(
+                (info.fts_content, info.role or "", session_id, sequence)
             )
-        n += 1
-    return n
+
+    if message_rows:
+        conn.executemany(
+            """INSERT INTO messages(session_id, sequence, uuid, parent_uuid,
+                                    role, timestamp, model, has_tool_use,
+                                    has_thinking)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            message_rows,
+        )
+    if fts_rows:
+        conn.executemany(
+            """INSERT INTO messages_fts(content, role, session_id, sequence)
+               VALUES (?, ?, ?, ?)""",
+            fts_rows,
+        )
+    return len(message_rows)
+
+
+def session_indexed(conn: sqlite3.Connection, session_id: str) -> bool:
+    """True if the messages table already has rows for this session.
+
+    Used by ingest.py to decide whether a manifest-only update (no
+    transcript bytes changed) can skip the full FTS rebuild. The
+    transcript bytes are unchanged → the FTS content is unchanged →
+    the index rows are still valid.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return row is not None
 
 
 def search(conn: sqlite3.Connection, query: str, *, limit: int = 25) -> list[dict]:
