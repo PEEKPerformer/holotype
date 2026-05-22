@@ -31,6 +31,7 @@ Most agent-CLI archival tools optimize for search, which means they filter "nois
 - **Two-track verification** — reviewer with `zstd` installed verifies the uncompressed canonical SHA-256; reviewer without `zstd` verifies the on-disk compressed SHA-256. Both succeed for valid deposits.
 - **Optional GPG-signed deposit commits** — opt-in at init via `--sign-commits` for high-stakes archives.
 - **Auto-push to the configured remote** — default ON when a remote URL is set at init (the privacy decision happens then, with an explicit warning). Pre-publication / IP-sensitive workflows can opt out via `--no-auto-push`. Local-only archives have nothing to push and auto-push is forced off.
+- **Optional encryption-before-push via `git-crypt`** (new in v1.1) — opt in with `init.py --encrypt-transcripts` for remotes you don't fully trust with the raw transcript content. The remote stores only encrypted blobs; manifests stay plaintext (metadata leakage is documented). **Data-loss risk**: lose the GPG key and every encrypted deposit becomes unrecoverable, including any paper-cited session. Init refuses without an explicit `--i-understand-key-loss-means-data-loss` acknowledgment, and drops `HOW_TO_BACK_UP_YOUR_KEY.md` into the archive with backup + recovery-testing instructions.
 - **LLM-adaptable extension** — when invoked from an unrecognized host CLI, the skill instructs the LLM to read `docs/ADDING_A_SOURCE.md` and write a new Source class against the documented contract, rather than silently dropping that CLI's sessions.
 
 ## Architecture

@@ -80,6 +80,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "unsigned commits in an archive the user thinks is signed."
         ),
     )
+    p.add_argument(
+        "--encrypt-transcripts",
+        action="store_true",
+        help=(
+            "Filter transcript.jsonl / transcript.jsonl.zst paths through "
+            "git-crypt before push, so the remote stores only encrypted "
+            "blobs. Manifests stay plaintext (metadata is still visible to "
+            "the remote: session IDs, timestamps, models, project paths). "
+            "Requires git-crypt installed, --remote-url set, and "
+            "--i-understand-key-loss-means-data-loss to acknowledge that "
+            "losing the GPG key makes the data unrecoverable."
+        ),
+    )
+    p.add_argument(
+        "--i-understand-key-loss-means-data-loss",
+        dest="key_loss_ack",
+        action="store_true",
+        help=(
+            "Acknowledge that with --encrypt-transcripts on, losing the "
+            "GPG key means losing access to every encrypted deposit. The "
+            "remote and any fresh clone are unrecoverable without the key. "
+            "Holotype cannot recover lost data. Required for "
+            "--encrypt-transcripts to proceed."
+        ),
+    )
     push_group = p.add_mutually_exclusive_group()
     push_group.add_argument(
         "--auto-push",
@@ -296,6 +321,7 @@ def write_config(
     compression: str,
     sign_commits: bool,
     auto_push: bool,
+    encrypt_transcripts: bool,
 ) -> None:
     config = {
         "archive_format_version": ARCHIVE_FORMAT_VERSION,
@@ -322,6 +348,11 @@ def write_config(
             # warning that transcripts will be pushed); auto_push just
             # honors that decision without forcing the user to remember.
             "auto_push": auto_push,
+            # When true, transcripts are filtered through git-crypt
+            # before reaching the git object store. Manifests stay
+            # plaintext. See HOW_TO_BACK_UP_YOUR_KEY.md inside the
+            # archive — losing the key makes deposits unrecoverable.
+            "encrypt_transcripts": encrypt_transcripts,
         },
         "verification": {
             "hash_algorithm": "sha256",
@@ -367,6 +398,36 @@ def write_pointer(archive: Path) -> None:
     POINTER_FILE.write_text(str(archive) + "\n")
 
 
+_ENCRYPT_DATA_LOSS_BANNER = """\
+==================================================================
+  ENCRYPTION ENABLED — DATA LOSS RISK ACKNOWLEDGED
+==================================================================
+  Transcripts will be filtered through git-crypt before push, so the
+  remote stores ENCRYPTED BLOBS that cannot be decrypted without
+  your GPG key.
+
+  If you lose your GPG key:
+    * Fresh clones of this remote CANNOT be read.
+    * Any paper citing this archive's session IDs loses access to
+      the transcript content backing the citation.
+    * Holotype cannot recover lost data.
+
+  Before you depend on this archive for any paper:
+    1. Back up your GPG private key to at least TWO locations on
+       different media (password manager + offline USB / printed
+       paper backup).
+    2. Test recovery: in a separate dir, `git clone` the remote and
+       `git-crypt unlock` with the backup. If it works, you're safe.
+    3. Document who else (lab PI, institutional IT, co-author) has
+       access to the key so the archive survives your job change.
+
+  Manifests stay PLAINTEXT on the remote (session IDs, timestamps,
+  models, project paths, token counts are visible). Encryption
+  covers only the transcript file contents.
+==================================================================
+"""
+
+
 def init_archive(args: argparse.Namespace) -> int:
     archive: Path = args.path
     config_path = archive / HOLOTYPE_SUBDIR / CONFIG_FILENAME
@@ -375,6 +436,39 @@ def init_archive(args: argparse.Namespace) -> int:
     # binary is installed. Write the resolved value into config.json so
     # ingest/verify/cite don't have to re-check at every invocation.
     import shutil as _sh
+
+    # --encrypt-transcripts preflight. Three preconditions must hold AT
+    # init time before we touch any state — silently degrading any of
+    # them would produce an archive whose user thinks transcripts are
+    # encrypted when they're not, which is worse than refusing.
+    if args.encrypt_transcripts:
+        if not args.remote_url:
+            print(
+                "init: --encrypt-transcripts requires --remote-url. There's "
+                "no point encrypting at-push for a local-only archive — the "
+                "data never leaves your machine.",
+                file=sys.stderr,
+            )
+            return 2
+        if _sh.which("git-crypt") is None:
+            print(
+                "init: --encrypt-transcripts requires the `git-crypt` binary "
+                "on PATH.\n  install with `brew install git-crypt` (macOS) "
+                "or `apt install git-crypt` (Debian/Ubuntu), then re-run.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.key_loss_ack:
+            sys.stderr.write(_ENCRYPT_DATA_LOSS_BANNER)
+            sys.stderr.write(
+                "\ninit: refusing to enable encryption without an explicit\n"
+                "acknowledgment. Re-run with --i-understand-key-loss-means-data-loss\n"
+                "to confirm you have a key-backup plan.\n"
+            )
+            return 2
+        # All preconditions met — print the banner anyway so the user
+        # sees it in the init transcript itself.
+        sys.stderr.write(_ENCRYPT_DATA_LOSS_BANNER)
     if args.compression == "auto":
         if _sh.which("zstd"):
             args.compression = "zstd"
@@ -449,6 +543,109 @@ def init_archive(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if args.encrypt_transcripts:
+        # Set up git-crypt INSIDE the archive's git repo. This creates
+        # .git/git-crypt/keys/default (the symmetric key); a fresh clone
+        # needs `git-crypt unlock` against an exported keyfile or a GPG
+        # collaborator add. We deliberately don't auto-export the key
+        # here — the user must export it themselves to a backup location
+        # (the data-loss banner walks them through). Auto-exporting
+        # would create a sense of "init handled it for me" that the
+        # threat model doesn't support.
+        gc = subprocess.run(["git-crypt", "init"], cwd=archive,
+                            capture_output=True, text=True)
+        if gc.returncode != 0:
+            sys.stderr.write(
+                f"init: `git-crypt init` failed:\n{gc.stderr}\n"
+                "  Aborting before writing any config. No state changed.\n"
+            )
+            return 2
+
+        # .gitattributes tells git which paths to filter through
+        # git-crypt. The patterns match both the plain and compressed
+        # transcript filenames the archive may use.
+        gitattrs = archive / ".gitattributes"
+        gitattrs_content = (
+            "# holotype: transcript bytes are filtered through git-crypt\n"
+            "# so the remote stores only encrypted blobs. Manifests stay\n"
+            "# plaintext (search/cite metadata is still useful on the remote).\n"
+            "sessions/**/transcript.jsonl filter=git-crypt diff=git-crypt\n"
+            "sessions/**/transcript.jsonl.zst filter=git-crypt diff=git-crypt\n"
+        )
+        gitattrs.write_text(gitattrs_content)
+
+        # Drop a key-backup how-to into the archive. Survives clones,
+        # so a future operator who only has the encrypted clone can
+        # at least see the recovery plan the original author committed to.
+        (archive / "HOW_TO_BACK_UP_YOUR_KEY.md").write_text(
+            dedent(
+                """\
+                # Backing up the git-crypt key for this archive
+
+                This archive's transcript bytes are encrypted at rest via
+                `git-crypt`. The remote stores only encrypted blobs.
+
+                ## What you must back up
+
+                The symmetric key lives at `.git/git-crypt/keys/default`
+                inside this archive's local clone. It is NOT in the
+                git working tree and NOT in the remote. **It exists
+                only on the machine that ran `init.py --encrypt-transcripts`.**
+
+                If you lose this file and don't have a backup, every
+                encrypted deposit in this archive becomes unrecoverable.
+
+                ## How to back it up
+
+                Export to a portable keyfile:
+
+                ```bash
+                git-crypt export-key /path/to/backup-keyfile.key
+                ```
+
+                Then store that file:
+
+                - In a password manager that accepts binary attachments.
+                - On an offline USB drive in a secure location.
+                - With a trusted collaborator or institutional IT.
+
+                Optionally print it as a paper QR backup for
+                disaster-recovery scenarios.
+
+                ## How to test recovery
+
+                Before depending on the archive for any paper:
+
+                ```bash
+                # In a scratch directory:
+                git clone <remote-url> recovery-test
+                cd recovery-test
+                git-crypt unlock /path/to/backup-keyfile.key
+                cat sessions/*/manifest.json | head     # should be readable plaintext
+                head sessions/*/transcript.jsonl        # should be readable plaintext, not garbage
+                ```
+
+                If the transcripts decrypt cleanly, your backup is good.
+
+                ## Adding collaborators
+
+                Use `git-crypt add-gpg-user <gpg-key-id>` to grant
+                another GPG identity access. Each collaborator can then
+                `git-crypt unlock` after cloning.
+
+                ## What does NOT get encrypted
+
+                - `manifest.json` (per-session metadata)
+                - `README.md`, `VERIFY.md`, `HOW_TO_BACK_UP_YOUR_KEY.md`
+                - The `.holotype/config.json`
+
+                Anyone with read access to the remote can see session
+                IDs, timestamps, models, project paths, and token totals.
+                Only the transcript file contents are encrypted.
+                """
+            )
+        )
+
     write_config(
         archive,
         args.remote_url,
@@ -456,6 +653,7 @@ def init_archive(args: argparse.Namespace) -> int:
         args.compression,
         args.sign_commits,
         args.auto_push,
+        args.encrypt_transcripts,
     )
     write_archive_readme(archive)
     write_verify_md(archive)
@@ -500,6 +698,7 @@ def init_archive(args: argparse.Namespace) -> int:
     print(f"  compression: {args.compression}")
     print(f"  sign commits: {args.sign_commits}")
     print(f"  auto-push:   {args.auto_push}")
+    print(f"  encrypt:     {args.encrypt_transcripts}")
     print()
     print("Next steps:")
     print("  - To deposit sessions:  python scripts/ingest.py")

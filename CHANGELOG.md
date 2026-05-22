@@ -2,6 +2,23 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-05-22
+
+### Added
+
+- **Optional encryption-before-push via `git-crypt`** (`init.py --encrypt-transcripts`). Filters `transcript.jsonl` / `transcript.jsonl.zst` paths through git-crypt so the remote stores only encrypted blobs. Manifests stay plaintext (session IDs, timestamps, models, project paths, and token totals remain visible to the remote — metadata leakage is the documented tradeoff). Use case: institutional / shared / partially-trusted remotes where you want backup capacity without exposing transcript content.
+- **Loud data-loss preflight.** init refuses to enable encryption without three preconditions: a remote configured (`--remote-url`), `git-crypt` on PATH, and an explicit `--i-understand-key-loss-means-data-loss` acknowledgment flag. The banner makes the failure mode unambiguous: lose the GPG key and every encrypted deposit is unrecoverable, including paper-cited sessions. Holotype cannot recover lost data.
+- **`HOW_TO_BACK_UP_YOUR_KEY.md`** is dropped into the archive at init time when encryption is on. Documents `git-crypt export-key`, recovery testing via fresh clone + unlock, and the recommended backup destinations (password manager, offline USB, paper QR, trusted collaborator). Survives clones so the recovery plan travels with the encrypted artifact.
+- SKILL.md wizard gains Step 4a (encryption decision) between the remote-URL step and the auto-push step, with the per-OS git-crypt install offer (`brew install git-crypt` / `apt install git-crypt` / `dnf` / `pacman`).
+- `config.deposit.encrypt_transcripts: bool` records the choice. Locked for the archive's lifetime — toggling mid-stream would orphan the prior commits' transcript blobs.
+
+### Verification tracks under encryption
+
+- Reviewer **with the key**: Track A works — `git-crypt unlock`, then `shasum -a 256 transcript.jsonl` matches `manifest.sha256`.
+- Reviewer **without the key**: Track B (`sha256_compressed` on the encrypted-blob-as-stored) is brittle because git-crypt's encrypted bytes aren't byte-stable across `git clone` paths. Documented limitation; encryption is a trust-the-key story, not a trust-nobody story.
+
+---
+
 ## [1.0.0] — 2026-05-22
 
 First public release. The substrate that makes Digital Discovery's LLM-DAS requirement satisfiable for the project's v2.0.0 paper, and the general-purpose scientific-provenance archive for agent-CLI sessions.

@@ -546,6 +546,67 @@ def main(argv: list[str] | None = None) -> int:
         expect("schema v4" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
 
+        step("encrypt-transcripts: refusal paths gate correctly")
+        # Refuse without --remote-url.
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(tmp / "should-not-exist"),
+            "--remote-url", "",
+            "--remote-kind", "none",
+            "--compression", "none",
+            "--encrypt-transcripts",
+            "--i-understand-key-loss-means-data-loss",
+        )
+        expect(result.returncode != 0,
+               f"--encrypt-transcripts without --remote-url should fail")
+        expect("requires --remote-url" in result.stderr,
+               f"expected --remote-url precondition message: {result.stderr}")
+
+        # Refuse without the explicit data-loss ack.
+        bare2 = tmp / "bare-encrypt-test.git"
+        subprocess.run(["git", "init", "--bare", str(bare2)], check=True, capture_output=True)
+        if shutil.which("git-crypt"):
+            result = run_script(
+                REPO_ROOT / "scripts" / "init.py",
+                "--path", str(tmp / "encrypted-no-ack"),
+                "--remote-url", f"file://{bare2}",
+                "--remote-kind", "other",
+                "--compression", "none",
+                "--encrypt-transcripts",
+            )
+            expect(result.returncode != 0,
+                   "missing --i-understand-key-loss-means-data-loss should fail")
+            expect("DATA LOSS" in result.stderr or "data-loss" in result.stderr,
+                   f"expected the data-loss banner in stderr: {result.stderr}")
+
+            step("encrypt-transcripts: full init configures git-crypt + .gitattributes")
+            enc_archive = tmp / "archive-encrypted"
+            result = run_script(
+                REPO_ROOT / "scripts" / "init.py",
+                "--path", str(enc_archive),
+                "--remote-url", f"file://{bare2}",
+                "--remote-kind", "other",
+                "--compression", "none",
+                "--encrypt-transcripts",
+                "--i-understand-key-loss-means-data-loss",
+                "--no-auto-push",  # decouple from auto-push for this test
+            )
+            expect(result.returncode == 0, f"encrypted init failed: {result.stderr}")
+            expect((enc_archive / ".gitattributes").exists(),
+                   ".gitattributes not written")
+            attrs = (enc_archive / ".gitattributes").read_text()
+            expect("filter=git-crypt" in attrs,
+                   f"git-crypt filter missing from .gitattributes: {attrs}")
+            expect((enc_archive / ".git" / "git-crypt" / "keys" / "default").exists(),
+                   "git-crypt key not initialized inside .git/")
+            expect((enc_archive / "HOW_TO_BACK_UP_YOUR_KEY.md").exists(),
+                   "key-backup how-to not dropped into archive")
+            enc_cfg = json.loads((enc_archive / ".holotype" / "config.json").read_text())
+            expect(enc_cfg["deposit"]["encrypt_transcripts"] is True,
+                   f"config.deposit.encrypt_transcripts not set: {enc_cfg['deposit']}")
+        else:
+            print("    (skipped git-crypt setup checks — `git-crypt` not on PATH)")
+
         step("auto-push: init with a local bare-repo remote and confirm ingest pushes")
         bare_remote = tmp / "bare-remote.git"
         subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True,
