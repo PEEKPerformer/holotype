@@ -421,6 +421,57 @@ def main(argv: list[str] | None = None) -> int:
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, f"mixed-source verify failed: {result.stderr}")
 
+        step("discover_candidates dedupes sessions across mirrored source paths")
+        # Make a second project tree that mirrors the first — same session
+        # IDs in a second location. Without dedup the same session yields
+        # twice (once per path); with dedup, only once.
+        mirror_src = tmp / "source-mirror"
+        proj_mirror = mirror_src / "-Users-test-fixture"
+        proj_mirror.mkdir(parents=True)
+        basic_uuid_dup = "00000000-0000-4000-8000-000000000001"
+        out_mirror = proj_mirror / f"{basic_uuid_dup}.jsonl"
+        shutil.copy(FIXTURES / "synthetic-session-basic.jsonl", out_mirror)
+        import os as _os, time as _time
+        older = _time.time() - 60
+        _os.utime(out_mirror, (older, older))
+
+        # Run discover_candidates in-process against a Source that returns
+        # BOTH source and mirror_src as default paths.
+        import importlib, sys as _sys
+        _sys.path.insert(0, str(REPO_ROOT))
+        ingest_mod = importlib.import_module("scripts.ingest") if False else None
+        # We can't easily import scripts/ingest.py as a module (hyphenated
+        # filename works but the script's argparse sits at module top).
+        # Instead, exercise the function via direct path manipulation.
+        from holotype.sources import ALL_SOURCES
+        from holotype.sources.claude_code import ClaudeCodeSource
+
+        # Monkey-patch default_source_paths to point at our two mirrored
+        # test trees, then call ingest.discover_candidates.
+        saved_paths = ClaudeCodeSource.default_source_paths
+        try:
+            ClaudeCodeSource.default_source_paths = staticmethod(
+                lambda: [source, mirror_src]
+            )
+            sys_path_added = str(REPO_ROOT / "scripts")
+            _sys.path.insert(0, sys_path_added)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "_ht_ingest_for_test", str(REPO_ROOT / "scripts" / "ingest.py")
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cands = mod.discover_candidates({}, None, None)
+            cc_cands = [(cls, c) for cls, c in cands if cls is ClaudeCodeSource]
+            basic_yields = [c for _, c in cc_cands
+                            if c.session_id == basic_uuid_dup]
+            expect(
+                len(basic_yields) == 1,
+                f"dedup failed: session yielded {len(basic_yields)} times across mirrored paths",
+            )
+        finally:
+            ClaudeCodeSource.default_source_paths = saved_paths
+
         print("\nALL CHECKS PASSED")
         success = True
         return 0

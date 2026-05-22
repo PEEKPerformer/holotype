@@ -79,25 +79,40 @@ def discover_candidates(
     explicit_source: Path | None,
     explicit_source_name: str | None,
 ) -> list[tuple[type[Source], DepositCandidate]]:
-    """Build the full deposit-candidate list across all registered Sources.
+    """Build the deduplicated deposit-candidate list across all Sources.
 
     With --source and --source-name, only the named Source is consulted
     and only at the given path. Otherwise we walk each Source's
     default_source_paths() filtered to ones that actually exist.
+
+    Many Sources list multiple default paths that mirror each other
+    (Claude Code: rsync backup + live ~/.claude/projects). Without
+    dedup, every session is yielded once per matching path, doubling
+    ingest work. We dedupe by (source_name, session_id), keeping the
+    FIRST occurrence — Sources are expected to list their most durable
+    path first (e.g. an immutable rsync mirror before a live source
+    Claude Code itself prunes).
     """
     candidates: list[tuple[type[Source], DepositCandidate]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(cls: type[Source], c: DepositCandidate) -> None:
+        key = (cls.name, c.session_id)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append((cls, c))
 
     if explicit_source is not None:
         explicit_source = explicit_source.expanduser().resolve()
         if explicit_source_name is None:
-            # Default explicit-source to claude-code for backward compat.
             explicit_source_name = "claude-code"
         try:
             cls = source_by_name(explicit_source_name)
         except KeyError as e:
             raise SystemExit(f"holotype: {e}")
         for c in cls.discover(explicit_source):
-            candidates.append((cls, c))
+            _add(cls, c)
         return candidates
 
     for cls in ALL_SOURCES:
@@ -110,7 +125,7 @@ def discover_candidates(
             except OSError:
                 continue
             for c in cls.discover(root_resolved):
-                candidates.append((cls, c))
+                _add(cls, c)
 
     return candidates
 
