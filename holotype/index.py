@@ -154,14 +154,18 @@ def upsert_session(
 def reindex_session(
     conn: sqlite3.Connection,
     session_id: str,
-    jsonl_path: Path,
+    session_source: Path,
     source_cls=None,
 ) -> int:
     """Drop and rewrite all message rows + FTS entries for a single session.
 
-    `source_cls` is a holotype.sources.base.Source subclass that owns the
-    transcript's schema. If omitted, defaults to ClaudeCodeSource (the
-    historical behavior, so old call sites still work).
+    ``session_source`` is either a session directory (preferred — handles
+    compressed deposits transparently via ``holotype.compression``) or a
+    direct path to a plain ``.jsonl`` (legacy callers).
+
+    ``source_cls`` is a holotype.sources.base.Source subclass that owns
+    the transcript's schema. If omitted, defaults to ClaudeCodeSource
+    so old call sites keep working.
 
     Returns the number of message rows written. Note: this is rows
     *indexed*, including session-header pseudo-records — slightly higher
@@ -171,55 +175,64 @@ def reindex_session(
         from holotype.sources.claude_code import ClaudeCodeSource
         source_cls = ClaudeCodeSource
 
+    from holotype.compression import iter_transcript_lines
+
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
 
+    if session_source.is_dir():
+        line_iter = iter_transcript_lines(session_source)
+    else:
+        def _file_iter():
+            with session_source.open("rb") as f:
+                yield from f
+        line_iter = _file_iter()
+
     n = 0
-    with jsonl_path.open("rb") as f:
-        for sequence, line in enumerate(f):
-            info = source_cls.parse_line(line)
-            if info is None:
-                continue
+    for sequence, line in enumerate(line_iter):
+        info = source_cls.parse_line(line)
+        if info is None:
+            continue
 
-            # Try to grab parent_uuid and uuid only if the schema has them
-            # (Claude Code does; Codex doesn't). Tolerant — we don't fail
-            # if these fields are absent.
-            uuid = None
-            parent_uuid = None
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    uuid = obj.get("uuid") or obj.get("id")
-                    parent_uuid = obj.get("parentUuid") or obj.get("parent_id")
-            except json.JSONDecodeError:
-                pass
+        # Try to grab parent_uuid and uuid only if the schema has them
+        # (Claude Code does; Codex doesn't). Tolerant — we don't fail
+        # if these fields are absent.
+        uuid = None
+        parent_uuid = None
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                uuid = obj.get("uuid") or obj.get("id")
+                parent_uuid = obj.get("parentUuid") or obj.get("parent_id")
+        except json.JSONDecodeError:
+            pass
 
+        conn.execute(
+            """INSERT INTO messages(session_id, sequence, uuid, parent_uuid,
+                                    role, timestamp, model, has_tool_use,
+                                    has_thinking, raw_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                sequence,
+                uuid,
+                parent_uuid,
+                info.role,
+                info.timestamp,
+                info.model,
+                1 if info.has_tool_use else 0,
+                1 if info.has_thinking else 0,
+                line.decode("utf-8", errors="replace").rstrip("\n"),
+            ),
+        )
+
+        if info.fts_content:
             conn.execute(
-                """INSERT INTO messages(session_id, sequence, uuid, parent_uuid,
-                                        role, timestamp, model, has_tool_use,
-                                        has_thinking, raw_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    sequence,
-                    uuid,
-                    parent_uuid,
-                    info.role,
-                    info.timestamp,
-                    info.model,
-                    1 if info.has_tool_use else 0,
-                    1 if info.has_thinking else 0,
-                    line.decode("utf-8", errors="replace").rstrip("\n"),
-                ),
+                """INSERT INTO messages_fts(content, role, session_id, sequence)
+                   VALUES (?, ?, ?, ?)""",
+                (info.fts_content, info.role or "", session_id, sequence),
             )
-
-            if info.fts_content:
-                conn.execute(
-                    """INSERT INTO messages_fts(content, role, session_id, sequence)
-                       VALUES (?, ?, ?, ?)""",
-                    (info.fts_content, info.role or "", session_id, sequence),
-                )
-            n += 1
+        n += 1
     return n
 
 

@@ -41,7 +41,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype import __version__
+from holotype.compression import compress_bytes, transcript_filename
 from holotype.env import claude_code_version, platform_info
+from holotype.hashing import sha256_bytes
 from holotype.index import open_index, reindex_session, upsert_session
 from holotype.manifest import build_manifest
 from holotype.sources import ALL_SOURCES, source_by_name
@@ -181,8 +183,17 @@ def deposit_one(
     archive: Path,
     source_cls: type[Source],
     candidate: DepositCandidate,
+    *,
+    compression: str | None,
 ) -> tuple[str, str]:
-    """Deposit one candidate. Returns (status, session_id)."""
+    """Deposit one candidate. Returns (status, session_id).
+
+    When ``compression == "zstd"``, the transcript is stored as
+    ``transcript.jsonl.zst`` and the manifest records both ``sha256``
+    (of the uncompressed canonical bytes — what's cited) and
+    ``sha256_compressed`` (of the file as it sits on disk — for
+    no-zstd reviewers).
+    """
     jsonl_path = candidate.jsonl_path
     session_id = candidate.session_id
 
@@ -196,15 +207,42 @@ def deposit_one(
         return ("skipped-empty", session_id)
 
     dest_dir = session_archive_dir(archive, candidate)
-    dest_jsonl = dest_dir / "transcript.jsonl"
+    on_disk_name = transcript_filename(compression)
+    dest_transcript = dest_dir / on_disk_name
     dest_manifest = dest_dir / "manifest.json"
 
     prior_sha = existing_sha256(archive, candidate)
+
+    # Idempotency: short-circuit before writing anything if the new bytes
+    # match what's already deposited. The manifest's `sha256` is always
+    # the uncompressed canonical hash, so this comparison is correct
+    # whether the archive is compressed or not.
+    new_sha = sha256_bytes(data)
+    if prior_sha == new_sha:
+        return ("skipped-unchanged", session_id)
+
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    tmp_jsonl = dest_jsonl.with_suffix(".jsonl.partial")
-    tmp_jsonl.write_bytes(data)
-    os.replace(tmp_jsonl, dest_jsonl)
+    if compression == "zstd":
+        payload = compress_bytes(data)
+        sha_compressed = sha256_bytes(payload)
+    else:
+        payload = data
+        sha_compressed = None
+
+    tmp_path = dest_transcript.with_suffix(dest_transcript.suffix + ".partial")
+    tmp_path.write_bytes(payload)
+    os.replace(tmp_path, dest_transcript)
+
+    # If switching modes (e.g. a prior plain deposit, now compressed),
+    # remove the stale alternate-form file so the session dir stays
+    # compression-uniform. Cheap and only triggers on the rare migration.
+    for stale_name in ("transcript.jsonl", "transcript.jsonl.zst"):
+        if stale_name == on_disk_name:
+            continue
+        stale = dest_dir / stale_name
+        if stale.exists():
+            stale.unlink()
 
     env = {
         "holotype_version": __version__,
@@ -212,18 +250,18 @@ def deposit_one(
         "platform": platform_info(),
     }
     manifest = build_manifest(
-        dest_jsonl,
+        data,
         source_cls,
         project_dir_encoded=candidate.project_dir_encoded,
         session_id=candidate.session_id,
+        on_disk_filename=on_disk_name,
         holotype_version=__version__,
         source_path=str(jsonl_path),
         env=env,
         parent_session_id=candidate.parent_session_id,
+        compression=compression,
+        sha256_compressed=sha_compressed,
     )
-
-    if prior_sha == manifest.sha256:
-        return ("skipped-unchanged", session_id)
 
     tmp_manifest = dest_manifest.with_suffix(".json.partial")
     tmp_manifest.write_text(manifest.to_json())
@@ -257,11 +295,13 @@ def update_index(
     candidate: DepositCandidate,
     git_commit: str | None,
 ) -> None:
+    from holotype.compression import find_transcript
+
     index_path = archive / ".holotype" / "index.sqlite"
     sess_dir = session_archive_dir(archive, candidate)
-    transcript = sess_dir / "transcript.jsonl"
+    found = find_transcript(sess_dir)
     manifest_path = sess_dir / "manifest.json"
-    if not (transcript.exists() and manifest_path.exists()):
+    if found is None or not manifest_path.exists():
         return
 
     manifest = json.loads(manifest_path.read_text())
@@ -280,7 +320,7 @@ def update_index(
             deposited_at=manifest.get("deposited_at", ""),
             git_commit=git_commit,
         )
-        reindex_session(conn, candidate.session_id, transcript, source_cls=source_cls)
+        reindex_session(conn, candidate.session_id, sess_dir, source_cls=source_cls)
         conn.commit()
 
 
@@ -310,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
 
     archive = find_archive(args.archive)
     config = load_config(archive)
+    compression = (config.get("deposit") or {}).get("compression") or None
+    if compression == "none":
+        compression = None
     candidates = discover_candidates(config, args.source, args.source_name)
 
     if not candidates and not args.dry_run:
@@ -333,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
                 counts["new"] += 1
                 continue
 
-            status, session_id = deposit_one(archive, source_cls, candidate)
+            status, session_id = deposit_one(archive, source_cls, candidate, compression=compression)
             counts[status] = counts.get(status, 0) + 1
 
             if status in ("new", "updated"):

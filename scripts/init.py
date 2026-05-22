@@ -59,6 +59,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Informational label for the remote kind (stored in config).",
     )
     p.add_argument(
+        "--compression",
+        default="auto",
+        choices=["auto", "none", "zstd"],
+        help=(
+            "Per-deposit compression. 'auto' (default) uses zstd if the binary "
+            "is on PATH, otherwise stores plain JSONL and records that fact in "
+            "the config. 'zstd' forces compression and refuses init if the "
+            "binary is missing. 'none' stores plain JSONL. Whichever is "
+            "resolved is locked for the life of the archive."
+        ),
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         help="Overwrite an existing archive's config (DANGEROUS).",
@@ -88,18 +100,37 @@ def write_verify_md(archive: Path) -> None:
 
             ```
             <archive>/
-            ├── .holotype/config.json     # Archive config (version, remote, etc.)
-            ├── README.md                  # This archive's identity
-            ├── VERIFY.md                  # This file
+            ├── .holotype/config.json      # Archive config (version, remote, compression mode)
+            ├── README.md                   # This archive's identity
+            ├── VERIFY.md                   # This file
             └── sessions/
                 └── <project-dir>/<session-id>/
-                    ├── transcript.jsonl   # Raw, byte-for-byte from ~/.claude/projects/
-                    ├── manifest.json      # SHA-256, env capture, model IDs, timestamps
-                    └── attachments/       # Optional binary attachments
+                    ├── transcript.jsonl        # Plain JSONL  (uncompressed archives)
+                    │  -OR-
+                    ├── transcript.jsonl.zst    # Zstd-compressed JSONL  (compressed archives)
+                    ├── manifest.json       # SHA-256, env capture, model IDs, timestamps
+                    └── attachments/        # Optional binary attachments
             ```
 
-            ## To verify a single session's transcript hash
+            Whether the deposit is plain or compressed is recorded per-session in
+            `manifest.json` (`"compression": null` or `"compression": "zstd"`)
+            and globally in `.holotype/config.json` (`deposit.compression`).
 
+            ## Manifest fields used for verification
+
+            | Field                | Meaning                                                              |
+            |----------------------|----------------------------------------------------------------------|
+            | `sha256`             | SHA-256 of the **uncompressed** JSONL bytes (canonical / citation hash) |
+            | `sha256_compressed`  | SHA-256 of the on-disk `.jsonl.zst` (only set when compression is on)|
+            | `compression`        | `null` or `"zstd"`                                                   |
+
+            ## Two verification tracks
+
+            Pick the track you can run. Either is sufficient.
+
+            ### Track A — uncompressed hash (requires `zstd` if the deposit is compressed)
+
+            For plain deposits:
             ```bash
             cd <archive>/sessions/<project-dir>/<session-id>/
             recomputed=$(shasum -a 256 transcript.jsonl | awk '{print $1}')
@@ -107,21 +138,58 @@ def write_verify_md(archive: Path) -> None:
             [ "$recomputed" = "$recorded" ] && echo "OK" || echo "MISMATCH"
             ```
 
-            ## To verify the entire archive
+            For compressed deposits (needs `zstd` installed — `brew install zstd` /
+            `apt install zstd`):
+            ```bash
+            cd <archive>/sessions/<project-dir>/<session-id>/
+            recomputed=$(zstd -dc transcript.jsonl.zst | shasum -a 256 | awk '{print $1}')
+            recorded=$(jq -r '.sha256' manifest.json)
+            [ "$recomputed" = "$recorded" ] && echo "OK" || echo "MISMATCH"
+            ```
+
+            ### Track B — compressed hash (no zstd needed)
+
+            Only available for compressed deposits. Hashes the `.jsonl.zst` file
+            as it sits on disk and compares to `sha256_compressed` in the manifest.
+
+            ```bash
+            cd <archive>/sessions/<project-dir>/<session-id>/
+            recomputed=$(shasum -a 256 transcript.jsonl.zst | awk '{print $1}')
+            recorded=$(jq -r '.sha256_compressed' manifest.json)
+            [ "$recomputed" = "$recorded" ] && echo "OK" || echo "MISMATCH"
+            ```
+
+            Use Track A when you want to inspect the JSONL content. Use Track B
+            when you only need to verify that the bytes on disk haven't been
+            tampered with and you don't have `zstd` handy.
+
+            ## Verifying the entire archive
 
             ```bash
             cd <archive>
             find sessions -name manifest.json | while read m; do
                 d=$(dirname "$m")
-                recomputed=$(shasum -a 256 "$d/transcript.jsonl" | awk '{print $1}')
-                recorded=$(jq -r '.sha256' "$m")
+                comp=$(jq -r '.compression // "none"' "$m")
+                if [ -f "$d/transcript.jsonl" ]; then
+                    recomputed=$(shasum -a 256 "$d/transcript.jsonl" | awk '{print $1}')
+                    recorded=$(jq -r '.sha256' "$m")
+                elif [ -f "$d/transcript.jsonl.zst" ] && command -v zstd >/dev/null; then
+                    recomputed=$(zstd -dc "$d/transcript.jsonl.zst" | shasum -a 256 | awk '{print $1}')
+                    recorded=$(jq -r '.sha256' "$m")
+                elif [ -f "$d/transcript.jsonl.zst" ]; then
+                    recomputed=$(shasum -a 256 "$d/transcript.jsonl.zst" | awk '{print $1}')
+                    recorded=$(jq -r '.sha256_compressed' "$m")
+                else
+                    echo "MISSING_TRANSCRIPT: $d"
+                    continue
+                fi
                 if [ "$recomputed" != "$recorded" ]; then
                     echo "TAMPER: $d"
                 fi
             done
             ```
 
-            ## To inspect the deposit history
+            ## Inspecting the deposit history
 
             ```bash
             git -C <archive> log --oneline sessions/
@@ -130,7 +198,7 @@ def write_verify_md(archive: Path) -> None:
             Each commit corresponds to one deposit. A clean archive will show
             one commit per session, with deterministic messages of the form:
 
-                deposit: <project-dir>/<session-id> (<message-count> msgs, <iso-timestamp>)
+                deposit: [<source>] sessions/<project-dir>/<session-id>
 
             ## What this archive does NOT include
 
@@ -170,7 +238,7 @@ def write_archive_readme(archive: Path) -> None:
     )
 
 
-def write_config(archive: Path, remote_url: str, remote_kind: str) -> None:
+def write_config(archive: Path, remote_url: str, remote_kind: str, compression: str) -> None:
     config = {
         "archive_format_version": ARCHIVE_FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -186,6 +254,7 @@ def write_config(archive: Path, remote_url: str, remote_kind: str) -> None:
         "deposit": {
             "commit_strategy": "per-session",
             "sign_commits": False,
+            "compression": compression,
         },
         "verification": {
             "hash_algorithm": "sha256",
@@ -206,6 +275,14 @@ def write_archive_gitignore(archive: Path) -> None:
             # Editor temp files
             *~
             *.swp
+
+            # Derived data (SQLite index, decompressed transcript cache).
+            # The git-tracked JSONLs + manifests are the source of truth;
+            # the items below are rebuilt on demand.
+            .holotype/index.sqlite
+            .holotype/index.sqlite-*
+            .holotype/cache/
+            .holotype/.lock
             """
         )
     )
@@ -227,6 +304,36 @@ def init_archive(args: argparse.Namespace) -> int:
     archive: Path = args.path
     config_path = archive / HOLOTYPE_SUBDIR / CONFIG_FILENAME
 
+    # Resolve --compression auto → concrete mode based on whether the zstd
+    # binary is installed. Write the resolved value into config.json so
+    # ingest/verify/cite don't have to re-check at every invocation.
+    import shutil as _sh
+    if args.compression == "auto":
+        if _sh.which("zstd"):
+            args.compression = "zstd"
+            print("init: zstd detected — enabling at-deposit compression")
+        else:
+            args.compression = "none"
+            print(
+                "init: zstd not on PATH — falling back to uncompressed deposits.\n"
+                "  install zstd later (`brew install zstd` / `apt install zstd`) "
+                "to re-init with compression on; the wizard's storage step can "
+                "drive that for you."
+            )
+    elif args.compression == "zstd":
+        # Hard mode: refuse init if zstd is missing rather than silently
+        # downgrading and ending up with an archive whose user *thought*
+        # they were getting compression.
+        if _sh.which("zstd") is None:
+            print(
+                "init: --compression zstd was requested but the `zstd` binary is "
+                "not on PATH.\n  install with `brew install zstd` (macOS) or "
+                "`apt install zstd` (Debian/Ubuntu), or re-run with "
+                "--compression auto or --compression none.",
+                file=sys.stderr,
+            )
+            return 2
+
     if archive.exists() and any(archive.iterdir()):
         if config_path.exists() and not args.force:
             print(
@@ -247,7 +354,7 @@ def init_archive(args: argparse.Namespace) -> int:
     if is_new_repo:
         run(["git", "init", "-b", "main"], cwd=archive)
 
-    write_config(archive, args.remote_url, args.remote_kind)
+    write_config(archive, args.remote_url, args.remote_kind, args.compression)
     write_archive_readme(archive)
     write_verify_md(archive)
     write_archive_gitignore(archive)
@@ -288,6 +395,7 @@ def init_archive(args: argparse.Namespace) -> int:
     print(f"  pointer:     {POINTER_FILE}")
     print(f"  remote:      {args.remote_url or '(none — local only)'}")
     print(f"  remote kind: {args.remote_kind}")
+    print(f"  compression: {args.compression}")
     print()
     print("Next steps:")
     print("  - To deposit sessions:  python scripts/ingest.py")

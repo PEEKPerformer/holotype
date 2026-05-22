@@ -20,8 +20,9 @@ def iter_all_sessions(archive: Path) -> Iterator[tuple[Path, dict]]:
     """Yield (session_dir, manifest_dict) for every deposit in the archive.
 
     Walks `archive/sessions/` to arbitrary depth, recognizing a session
-    by the presence of both `transcript.jsonl` and `manifest.json` in
-    a directory. Order is stable (sorted by directory path).
+    by the presence of both a transcript file (``transcript.jsonl`` or
+    ``transcript.jsonl.zst``) and ``manifest.json`` in a directory.
+    Order is stable (sorted by directory path).
     """
     sessions_root = archive / "sessions"
     if not sessions_root.exists():
@@ -29,7 +30,11 @@ def iter_all_sessions(archive: Path) -> Iterator[tuple[Path, dict]]:
 
     for manifest_path in sorted(sessions_root.rglob("manifest.json")):
         sess_dir = manifest_path.parent
-        if not (sess_dir / "transcript.jsonl").exists():
+        has_transcript = (
+            (sess_dir / "transcript.jsonl").exists()
+            or (sess_dir / "transcript.jsonl.zst").exists()
+        )
+        if not has_transcript:
             continue
         try:
             manifest = json.loads(manifest_path.read_text())

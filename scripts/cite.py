@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype.archive import resolve_session_by_prefix
+from holotype.compression import find_transcript, read_transcript_bytes
 
 
 def find_archive(explicit: Path | None) -> Path:
@@ -58,60 +59,63 @@ def resolve_session(archive: Path, prefix: str) -> tuple[str, Path] | None:
     return (sess_dir.name, sess_dir)
 
 
-def render_markdown(transcript: Path) -> str:
-    """Render a JSONL transcript as a human-readable Markdown document.
+def render_markdown(sess_dir: Path) -> str:
+    """Render a session's JSONL transcript as human-readable Markdown.
 
     Lossy by design — for human reading only. The canonical record is
-    the raw JSONL alongside.
+    the raw JSONL alongside. Reads via the compression helper so it
+    handles both ``.jsonl`` and ``.jsonl.zst`` deposits transparently.
     """
+    data = read_transcript_bytes(sess_dir)
+    if data is None:
+        return "# (no transcript found in session dir)\n"
     out: list[str] = ["# Session transcript\n"]
-    out.append(f"_Source: `{transcript.name}` (raw JSONL is the canonical record)_\n")
+    out.append("_Raw JSONL is the canonical record_\n")
 
-    with transcript.open("rb") as f:
-        for line in f:
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
+    for line in data.splitlines(keepends=True):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
 
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else None
-            if not msg:
-                continue
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else None
+        if not msg:
+            continue
 
-            role = msg.get("role") or obj.get("type") or "?"
-            timestamp = obj.get("timestamp", "")
-            content = msg.get("content")
+        role = msg.get("role") or obj.get("type") or "?"
+        timestamp = obj.get("timestamp", "")
+        content = msg.get("content")
 
-            out.append(f"## {role}  _{timestamp}_\n")
+        out.append(f"## {role}  _{timestamp}_\n")
 
-            if isinstance(content, str):
-                out.append(content + "\n")
-            elif isinstance(content, list):
-                for item in content:
-                    if not isinstance(item, dict):
-                        continue
-                    t = item.get("type")
-                    if t == "text":
-                        out.append((item.get("text") or "") + "\n")
-                    elif t == "thinking":
-                        out.append("<details><summary>thinking</summary>\n\n")
-                        out.append((item.get("thinking") or "") + "\n\n</details>\n")
-                    elif t == "tool_use":
-                        name = item.get("name", "?")
-                        inp = json.dumps(item.get("input", {}), indent=2, ensure_ascii=False)
-                        out.append(f"**tool_use: `{name}`**\n\n```json\n{inp}\n```\n")
-                    elif t == "tool_result":
-                        out.append("**tool_result**\n\n")
-                        inner = item.get("content")
-                        if isinstance(inner, str):
-                            out.append(f"```\n{inner}\n```\n")
-                        elif isinstance(inner, list):
-                            for sub in inner:
-                                if isinstance(sub, dict) and isinstance(sub.get("text"), str):
-                                    out.append(f"```\n{sub['text']}\n```\n")
-            out.append("\n---\n\n")
+        if isinstance(content, str):
+            out.append(content + "\n")
+        elif isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                t = item.get("type")
+                if t == "text":
+                    out.append((item.get("text") or "") + "\n")
+                elif t == "thinking":
+                    out.append("<details><summary>thinking</summary>\n\n")
+                    out.append((item.get("thinking") or "") + "\n\n</details>\n")
+                elif t == "tool_use":
+                    name = item.get("name", "?")
+                    inp = json.dumps(item.get("input", {}), indent=2, ensure_ascii=False)
+                    out.append(f"**tool_use: `{name}`**\n\n```json\n{inp}\n```\n")
+                elif t == "tool_result":
+                    out.append("**tool_result**\n\n")
+                    inner = item.get("content")
+                    if isinstance(inner, str):
+                        out.append(f"```\n{inner}\n```\n")
+                    elif isinstance(inner, list):
+                        for sub in inner:
+                            if isinstance(sub, dict) and isinstance(sub.get("text"), str):
+                                out.append(f"```\n{sub['text']}\n```\n")
+        out.append("\n---\n\n")
     return "".join(out)
 
 
@@ -156,9 +160,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     session_id, session_dir = resolved
 
-    transcript = session_dir / "transcript.jsonl"
+    found = find_transcript(session_dir)
     manifest_path = session_dir / "manifest.json"
-    if not (transcript.exists() and manifest_path.exists()):
+    if found is None or not manifest_path.exists():
         sys.stderr.write(f"holotype: session {session_id} is missing files\n")
         return 1
 
@@ -176,10 +180,19 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out or (archive / "cite" / session_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy(transcript, out_dir / "transcript.jsonl")
+    # The bundle always ships a plain `transcript.jsonl` so a reviewer
+    # doesn't need zstd installed to read it. The manifest is copied
+    # as-is — its canonical `sha256` field matches the plain bytes we
+    # just wrote, so verification with `shasum -a 256 transcript.jsonl`
+    # works without zstd regardless of how the archive stored it.
+    bundle_bytes = read_transcript_bytes(session_dir)
+    if bundle_bytes is None:
+        sys.stderr.write(f"holotype: could not read transcript for {session_id}\n")
+        return 1
+    (out_dir / "transcript.jsonl").write_bytes(bundle_bytes)
     shutil.copy(manifest_path, out_dir / "manifest.json")
     (out_dir / "cite.txt").write_text(citation)
-    (out_dir / "render.md").write_text(render_markdown(transcript))
+    (out_dir / "render.md").write_text(render_markdown(session_dir))
 
     print(f"  bundle:   {out_dir}")
     print(f"  files:    transcript.jsonl, manifest.json, cite.txt, render.md")

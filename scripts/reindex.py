@@ -61,7 +61,6 @@ def main(argv: list[str] | None = None) -> int:
 
     with open_index(index_path) as conn:
         for sess_dir, manifest in iter_all_sessions(archive):
-            transcript = sess_dir / "transcript.jsonl"
             source_name = manifest.get("source", "claude-code")
             try:
                 source_cls = source_by_name(source_name)
@@ -82,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
                 deposited_at=manifest.get("deposited_at", ""),
                 git_commit=None,
             )
-            n_messages += reindex_session(conn, sess_dir.name, transcript, source_cls=source_cls)
+            n_messages += reindex_session(conn, sess_dir.name, sess_dir, source_cls=source_cls)
             n_sessions += 1
         conn.commit()
 

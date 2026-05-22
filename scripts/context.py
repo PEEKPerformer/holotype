@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype.archive import resolve_session_by_prefix
+from holotype.compression import find_transcript, read_transcript_bytes
 
 
 def find_archive(explicit: Path | None) -> Path:
@@ -64,8 +65,28 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"holotype: no session matching '{args.session_id}' in {archive}\n")
         return 1
     session_id, session_dir = resolved
-    transcript = session_dir / "transcript.jsonl"
+    found = find_transcript(session_dir)
     manifest = session_dir / "manifest.json"
+    if found is None:
+        sys.stderr.write(f"holotype: no transcript file under {session_dir}\n")
+        return 1
+
+    transcript, is_compressed = found
+    if is_compressed:
+        # Materialize a plain .jsonl cache file so the caller (typically
+        # a Claude `Read` invocation) can read it without dealing with
+        # the compressed format. Cached in `.holotype/cache/<id>.jsonl`
+        # so repeated context calls don't re-decompress.
+        cache_dir = archive / ".holotype" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{session_id}.jsonl"
+        if not cache_path.exists() or cache_path.stat().st_mtime < transcript.stat().st_mtime:
+            data = read_transcript_bytes(session_dir)
+            if data is None:
+                sys.stderr.write(f"holotype: decompress failed for {session_id}\n")
+                return 1
+            cache_path.write_bytes(data)
+        transcript = cache_path
 
     if args.json:
         print(json.dumps({

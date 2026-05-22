@@ -27,7 +27,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype.archive import iter_all_sessions
-from holotype.hashing import sha256_file
+from holotype.compression import (
+    COMPRESSED_TRANSCRIPT,
+    PLAIN_TRANSCRIPT,
+    decompress_bytes,
+    zstd_available,
+)
+from holotype.hashing import sha256_bytes, sha256_file
 
 
 def find_archive(explicit: Path | None) -> Path:
@@ -44,13 +50,73 @@ def find_archive(explicit: Path | None) -> Path:
 
 
 def iter_sessions(archive: Path, prefix: str | None):
-    """Yield (session_id, transcript_path, manifest_path) for each session,
+    """Yield (session_id, session_dir, manifest_path) for each session,
     walking the archive at arbitrary depth (Claude Code subagents AND
     Codex deposits under sessions/codex/.../)."""
     for sess_dir, _ in iter_all_sessions(archive):
         if prefix and not sess_dir.name.startswith(prefix):
             continue
-        yield sess_dir.name, sess_dir / "transcript.jsonl", sess_dir / "manifest.json"
+        yield sess_dir.name, sess_dir, sess_dir / "manifest.json"
+
+
+def verify_session(sess_dir: Path, manifest: dict) -> dict:
+    """Verify a single session, choosing the best track for the deposit.
+
+    Returns a dict with at least ``status`` ('OK' | 'TAMPER' | 'MISSING_HASH'
+    | 'NO_ZSTD' | 'NO_TRANSCRIPT' | 'ERROR'). Track choice:
+
+    - Uncompressed deposit: hash ``transcript.jsonl``, compare to
+      ``manifest.sha256`` (canonical).
+    - Compressed deposit + zstd installed: decompress, hash uncompressed
+      bytes, compare to ``manifest.sha256`` (canonical track).
+    - Compressed deposit + no zstd: hash ``transcript.jsonl.zst``
+      directly, compare to ``manifest.sha256_compressed`` (fallback
+      track, valid for reviewers who can't or won't install zstd).
+    """
+    plain = sess_dir / PLAIN_TRANSCRIPT
+    compressed = sess_dir / COMPRESSED_TRANSCRIPT
+    recorded_uncompressed = manifest.get("sha256")
+    recorded_compressed = manifest.get("sha256_compressed")
+
+    if plain.exists():
+        if not recorded_uncompressed:
+            return {"status": "MISSING_HASH",
+                    "detail": "manifest has no sha256 field"}
+        recomputed = sha256_file(plain)
+        if recomputed == recorded_uncompressed:
+            return {"status": "OK", "track": "uncompressed",
+                    "sha256": recomputed}
+        return {"status": "TAMPER", "track": "uncompressed",
+                "recorded": recorded_uncompressed, "recomputed": recomputed}
+
+    if compressed.exists():
+        # Prefer the canonical (uncompressed) track when zstd is available;
+        # otherwise fall back to verifying the file as-stored.
+        if zstd_available() and recorded_uncompressed:
+            try:
+                raw = decompress_bytes(compressed.read_bytes())
+            except Exception as e:
+                return {"status": "ERROR", "detail": f"decompress failed: {e}"}
+            recomputed = sha256_bytes(raw)
+            if recomputed == recorded_uncompressed:
+                return {"status": "OK", "track": "uncompressed-via-zstd",
+                        "sha256": recomputed}
+            return {"status": "TAMPER", "track": "uncompressed-via-zstd",
+                    "recorded": recorded_uncompressed, "recomputed": recomputed}
+
+        if recorded_compressed:
+            recomputed = sha256_file(compressed)
+            if recomputed == recorded_compressed:
+                return {"status": "OK", "track": "compressed",
+                        "sha256_compressed": recomputed}
+            return {"status": "TAMPER", "track": "compressed",
+                    "recorded": recorded_compressed, "recomputed": recomputed}
+
+        return {"status": "NO_ZSTD",
+                "detail": "compressed deposit but zstd unavailable and "
+                          "manifest has no sha256_compressed"}
+
+    return {"status": "NO_TRANSCRIPT", "detail": "no transcript file in session dir"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     n_fail = 0
     n_missing_hash = 0
 
-    for sid, transcript, manifest_path in iter_sessions(archive, args.session_id):
+    for sid, sess_dir, manifest_path in iter_sessions(archive, args.session_id):
         try:
             manifest = json.loads(manifest_path.read_text())
         except (OSError, json.JSONDecodeError) as e:
@@ -79,20 +145,15 @@ def main(argv: list[str] | None = None) -> int:
             n_fail += 1
             continue
 
-        recorded = manifest.get("sha256")
-        if not recorded:
-            results.append({"session_id": sid, "status": "MISSING_HASH",
-                            "detail": "manifest has no sha256 field"})
-            n_missing_hash += 1
-            continue
-
-        recomputed = sha256_file(transcript)
-        if recomputed == recorded:
-            results.append({"session_id": sid, "status": "OK", "sha256": recomputed})
+        outcome = verify_session(sess_dir, manifest)
+        outcome["session_id"] = sid
+        results.append(outcome)
+        status = outcome["status"]
+        if status == "OK":
             n_pass += 1
+        elif status == "MISSING_HASH":
+            n_missing_hash += 1
         else:
-            results.append({"session_id": sid, "status": "TAMPER",
-                            "recorded": recorded, "recomputed": recomputed})
             n_fail += 1
 
     if args.json:
@@ -104,13 +165,16 @@ def main(argv: list[str] | None = None) -> int:
             status = r["status"]
             sid = r["session_id"][:8]
             if status == "OK":
-                print(f"  OK      {sid}  {r['sha256'][:12]}…")
+                shown_hash = r.get("sha256") or r.get("sha256_compressed") or ""
+                track = r.get("track", "")
+                tag = f" via {track}" if track and track != "uncompressed" else ""
+                print(f"  OK      {sid}  {shown_hash[:12]}…{tag}")
             elif status == "TAMPER":
-                print(f"  TAMPER  {sid}")
+                print(f"  TAMPER  {sid}  ({r.get('track','?')} track)")
                 print(f"          recorded:   {r['recorded']}")
                 print(f"          recomputed: {r['recomputed']}")
             else:
-                print(f"  {status:<8s}{sid}  {r.get('detail','')}")
+                print(f"  {status:<13s}{sid}  {r.get('detail','')}")
         print()
         total = n_pass + n_fail + n_missing_hash
         print(f"  {n_pass}/{total} sessions verified clean"

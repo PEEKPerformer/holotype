@@ -131,11 +131,15 @@ def main(argv: list[str] | None = None) -> int:
         archive = tmp / "archive"
 
         step("init.py creates a fresh local-only archive")
+        # Force plain JSONL so this branch exercises the uncompressed
+        # deposit path end-to-end. The dedicated compression section
+        # near the bottom of this file covers the zstd path.
         result = run_script(
             REPO_ROOT / "scripts" / "init.py",
             "--path", str(archive),
             "--remote-url", "",
             "--remote-kind", "none",
+            "--compression", "none",
         )
         if args.verbose:
             print(result.stdout)
@@ -182,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest["sha256"] == recomputed,
                 f"sha256 mismatch for {tr}: manifest={manifest['sha256']}, recomputed={recomputed}",
             )
-            expect(manifest["manifest_version"] == 2, "manifest_version != 2")
+            expect(manifest["manifest_version"] == 3, "manifest_version != 3")
             expect(manifest.get("source") == "claude-code",
                    f"manifest.source wrong: {manifest.get('source')}")
             expect(manifest["message_count"] > 0, "message_count is zero")
@@ -420,6 +424,112 @@ def main(argv: list[str] | None = None) -> int:
         step("verify.py still clean with mixed claude-code + codex sessions")
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, f"mixed-source verify failed: {result.stderr}")
+
+        step("usage_estimate.py emits parseable JSON from a synthetic source")
+        # Monkey-patch the registered source's default paths to point at
+        # the test source, then call collect() in-process.
+        import sys as _sys2
+        _sys2.path.insert(0, str(REPO_ROOT))
+        from holotype.sources.claude_code import ClaudeCodeSource as _CC
+        import importlib.util as _iu
+        _saved_default_paths = _CC.default_source_paths
+        try:
+            _CC.default_source_paths = staticmethod(lambda: [source])
+            _ue_spec = _iu.spec_from_file_location(
+                "_ht_usage_for_test", str(REPO_ROOT / "scripts" / "usage_estimate.py")
+            )
+            ue_mod = _iu.module_from_spec(_ue_spec)
+            _ue_spec.loader.exec_module(ue_mod)
+            ue_data = ue_mod.collect()
+            expect(ue_data["combined"]["file_count"] >= 2,
+                   f"usage_estimate saw too few files: {ue_data['combined']['file_count']}")
+            expect(ue_data["combined"]["total_bytes"] > 0,
+                   "usage_estimate total_bytes is zero")
+            expect(ue_data["combined"]["bytes_per_day"] >= 0,
+                   "usage_estimate bytes_per_day went negative")
+        finally:
+            _CC.default_source_paths = _saved_default_paths
+
+        step("compression: init + ingest + verify + cite end-to-end (zstd archive)")
+        z_archive = tmp / "archive-zstd"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(z_archive),
+            "--remote-url", "",
+            "--remote-kind", "none",
+            "--compression", "zstd",
+        )
+        expect(result.returncode == 0, f"init --compression zstd failed: {result.stderr}")
+        z_cfg = json.loads((z_archive / ".holotype" / "config.json").read_text())
+        expect(z_cfg["deposit"]["compression"] == "zstd",
+               f"config compression wrong: {z_cfg['deposit'].get('compression')}")
+
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(z_archive),
+            "--source", str(source),
+        )
+        expect(result.returncode == 0, f"compressed ingest failed: {result.stderr}")
+        expect("new=3" in result.stdout, f"expected new=3 in compressed ingest:\n{result.stdout}")
+
+        z_compressed = sorted((z_archive / "sessions").rglob("transcript.jsonl.zst"))
+        z_plain = sorted((z_archive / "sessions").rglob("transcript.jsonl"))
+        expect(len(z_compressed) == 3, f"expected 3 .jsonl.zst deposits, got {len(z_compressed)}")
+        expect(len(z_plain) == 0, f"expected 0 plain .jsonl in compressed archive, got {len(z_plain)}")
+
+        z_manifests = list((z_archive / "sessions").rglob("manifest.json"))
+        for mp in z_manifests:
+            m = json.loads(mp.read_text())
+            expect(m["compression"] == "zstd", f"manifest compression wrong: {m.get('compression')}")
+            expect(m["sha256_compressed"] is not None, "sha256_compressed not recorded")
+            expect(m["sha256"] is not None, "sha256 (uncompressed) not recorded")
+            expect(m["transcript_filename"] == "transcript.jsonl.zst",
+                   f"transcript_filename wrong: {m.get('transcript_filename')}")
+
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(z_archive))
+        expect(result.returncode == 0, f"verify on compressed archive failed: {result.stderr}\n{result.stdout}")
+
+        # Tamper detection on the compressed file should fire.
+        z_first = z_compressed[0]
+        original_bytes = z_first.read_bytes()
+        with z_first.open("ab") as f:
+            f.write(b"\x00\x00garbage\x00\x00")
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(z_archive))
+        expect(result.returncode == 1, "verify didn't catch tamper on .jsonl.zst")
+        z_first.write_bytes(original_bytes)
+
+        # Cite a compressed-archive session — bundle must contain plain .jsonl
+        # so the reviewer doesn't need zstd to read the artifact.
+        first_z_session = z_manifests[0].parent.name
+        z_bundle = tmp / "z-bundle"
+        result = run_script(
+            REPO_ROOT / "scripts" / "cite.py", first_z_session,
+            "--archive", str(z_archive),
+            "--out", str(z_bundle),
+        )
+        expect(result.returncode == 0, f"cite from compressed archive failed: {result.stderr}")
+        expect((z_bundle / "transcript.jsonl").exists(),
+               "cite bundle from compressed archive is missing plain transcript.jsonl")
+        expect(not (z_bundle / "transcript.jsonl.zst").exists(),
+               "cite bundle should not ship .jsonl.zst — reviewer needs plain")
+        # The plain transcript in the bundle should hash to the canonical sha256.
+        bundle_manifest = json.loads((z_bundle / "manifest.json").read_text())
+        bundle_hash = sha256_file(z_bundle / "transcript.jsonl")
+        expect(bundle_hash == bundle_manifest["sha256"],
+               f"cite bundle plain transcript hash != canonical sha256: {bundle_hash} vs {bundle_manifest['sha256']}")
+
+        # context.py on a compressed archive should print a path to a plain
+        # .jsonl cache file the caller can Read.
+        result = run_script(
+            REPO_ROOT / "scripts" / "context.py", first_z_session,
+            "--archive", str(z_archive),
+        )
+        expect(result.returncode == 0, f"context on compressed archive failed: {result.stderr}")
+        ctx_path = Path(result.stdout.strip())
+        expect(ctx_path.exists() and ctx_path.suffix == ".jsonl",
+               f"context didn't materialize a plain .jsonl: {ctx_path}")
+        expect(b"{" in ctx_path.read_bytes()[:50],
+               "context cache file doesn't look like JSONL")
 
         step("discover_candidates dedupes sessions across mirrored source paths")
         # Make a second project tree that mirrors the first — same session
