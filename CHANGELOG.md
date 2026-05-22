@@ -2,6 +2,23 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-05-22
+
+Wizard recommendation reframe — no behavioral default change.
+
+### Changed
+
+- **Wizard Step 3 — privacy-decision options reordered + reframed.** The recommended option is now **GitHub private repo (encrypted)** rather than the historical "Local only (recommended for sensitive work)." Rationale: encrypted-GitHub is the natural 3-2-1-backup-rule answer for scientific work — local archive + offsite encrypted backup + key backed up separately. Local-only is still listed (third, with its own rationale: easiest install, safest from third-party-data-exposure concerns, single-disk-failure data loss risk noted). Self-hosted / Synology / Other URL still listed for non-GitHub workflows; the encryption decision at Step 4a continues to apply to them too.
+- **Wizard Step 4a — encryption question skips redundancy.** When the user picks the "GitHub private repo (encrypted)" Step 3 option, encryption is already implied — Step 4a skips the y/N question and goes straight to the data-loss confirmation. For any other remote choice, Step 4a still independently asks.
+
+### Why this is a recommendation shift, NOT a default change
+
+The TECHNICAL default (what happens with `python scripts/init.py --path ... --remote-url ""`) is unchanged. The wizard's *suggested* path changed. Users who pick the recommendation are walked through `gh repo create` + `git-crypt` install + key generation + key-loss ack — none of which happens silently. Users who pick local-only still get the fast no-deps path.
+
+The class of user who would have been bitten by a default-flip (data-loss-by-default for users who don't understand key backup, hard `gh`/`git-crypt` prerequisites, banner-blindness from loud warnings firing at every fresh install) is unaffected — they still see local-only as a first-class option and pick it if their threat model demands.
+
+---
+
 ## [1.1.1] — 2026-05-22
 
 Wizard polish + first-time-backfill perf, driven by feedback from the first cold-start end-to-end run in a fresh Claude Code session.

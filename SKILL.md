@@ -52,18 +52,20 @@ Also offer to change archive location at this point (e.g., for a user with a sma
 
 **Step 3 — Privacy decision: remote or local-only?** This is the critical decision. State explicitly to the user, *before* offering options:
 
-> "The archive will contain verbatim Claude Code transcripts, including any file contents, command output, environment details, and tool results Claude saw during sessions. If you add a git remote, all of that data will be pushed to that remote when you sync. Choose carefully."
+> "The archive will contain verbatim Claude Code / Codex / Antigravity transcripts, including any file contents, command output, environment details, and tool results the agent saw during sessions. If you add a git remote, that data will be pushed to that remote when you sync — encrypted or not depending on your next choice. Choose carefully."
 
-Then offer:
-- **Local only (recommended for sensitive work)** — no remote. Easiest, safest.
-- **GitHub private repo** — convenient if you trust GitHub; data leaves your machine.
-- **Self-hosted git** — Gitea / Forgejo / GitLab CE / bare repo on your own server. Most private if you control the server.
-- **Synology or local-network git** — middle ground; data stays on hardware you own.
-- **Other URL** — user pastes the remote.
+Then offer the following four options, presented in this order so the recommended option is first:
+
+- **GitHub private repo (encrypted)** — *Recommended for paper-citable archives.* Transcripts are filtered through `git-crypt` before push, so GitHub stores only encrypted blobs. Manifests stay plaintext on the remote (session IDs, timestamps, models, project paths, token counts are visible there). This is the 3-2-1-backup-rule answer for scientific work: local archive + offsite encrypted backup + key backed up separately. **Requires `gh` authed + `git-crypt` installed + GPG key + explicit key-loss acknowledgment.**
+- **GitHub private repo (plain)** — Convenient if you fully trust GitHub with your transcript content. No extra dependencies beyond `gh` auth. Faster setup than the encrypted option, but the remote sees everything Claude saw.
+- **Local only** — No remote. Easiest install (no external dependencies), safest from third-party-data-exposure concerns, but single-disk-failure = data loss. Pick this if you don't yet have publishing aspirations for these sessions, or if institutional policy bans storing pre-publication data on third-party clouds in any form.
+- **Self-hosted / Synology / Other URL** — Gitea / Forgejo / GitLab CE / bare repo on a server you control, or a NAS at home, or any other git remote URL. The encryption choice at Step 4a applies here too — recommended if the server isn't fully under your control (institutional GitHub Enterprise, shared NAS).
+
+The encrypted-GitHub option is recommended because it covers the most common scientific-archive failure modes (single-disk loss + needing offsite backup for paper citations) without leaking transcript content to the remote. If the user picks it, the wizard chains through `gh repo create` + `git-crypt` install + key generation as needed — none of which happens silently. If the user picks any other option, Step 4a will still independently ask about encryption (it's a separate decision from "do I want a remote").
 
 **Step 4 — If a remote was chosen, get the URL.** For GitHub, also ask for org/account and repo name and offer to `gh repo create --private` it on the fly (but only if the user says "yes" — never silently).
 
-**Step 4a — Encryption-before-push (only if a remote was chosen).** Ask:
+**Step 4a — Encryption-before-push (only if a remote was chosen).** If the user picked **GitHub private repo (encrypted)** at Step 3, encryption is already implied — skip the "y/N" question and go straight to the data-loss confirmation below. Otherwise (any other remote option in Step 3), ask:
 
 > "Filter transcripts through `git-crypt` before push, so the remote stores only encrypted blobs? (y/N — default no)
 >
@@ -71,7 +73,7 @@ Then offer:
 >
 > **Data-loss risk**: if you lose the GPG key, every encrypted deposit becomes unrecoverable — including any paper-cited session. The key lives at `.git/git-crypt/keys/default` inside the archive and is NOT pushed to the remote. You MUST export and back it up to at least two locations (password manager + offline USB, paper QR backup, trusted collaborator) before depending on the archive for citation. Holotype cannot recover lost data."
 
-If the user says yes:
+If the user says yes (or if encryption is implied from the Step 3 recommendation):
 - Verify `git-crypt` is on PATH (`command -v git-crypt`). If missing, offer to install via the same per-OS package manager the zstd step uses (`brew install git-crypt` / `apt install git-crypt` / `dnf install git-crypt` / `pacman -S git-crypt`). Require explicit confirmation before running the install.
 - Confirm the data-loss acknowledgment by repeating: *"You understand that losing the GPG key means the archive's encrypted deposits cannot be recovered. Holotype cannot recover lost data. Proceed? (yes/no)"* — only proceed on an unambiguous "yes."
 - The `init.py` invocation will need both `--encrypt-transcripts` and `--i-understand-key-loss-means-data-loss`.
