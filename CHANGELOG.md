@@ -2,6 +2,34 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-05-22
+
+Parallel worker pool for per-session ingest. The architectural lift that the v1.x perf work pointed toward, shipped as a major version because the ingest pipeline's internal shape changed even though the public CLI contract didn't.
+
+### Added
+
+- **`ingest.py --workers N`** — parallel deposit workers. `--workers 0` (default) auto-selects `min(os.cpu_count(), 8)`. `--workers 1` forces serial mode for debugging. Each worker is an independent process that does one candidate's hash + compress + manifest-build + transcript-write. The coordinator drains worker results in submission order and runs the single-writer SQLite + git path serially. Workers don't share state with each other or with the coordinator; they each re-open zstd subprocesses, re-import Source classes, and apply live-file safety on their own slice.
+
+- **`holotype.parallel`** module — exposes `process_candidate_worker()` (pickleable top-level function for `ProcessPoolExecutor`) and `candidate_to_dict()` helper. Workers re-hydrate `DepositCandidate` from the dict form, re-resolve the `Source` class by name, and call the existing `deposit_one()` — so the per-session contract is unchanged.
+
+### Changed
+
+- **`commit_deposit()` now adds files by explicit path, not by directory.** Required for the parallel path: workers write files concurrently, so by the time the coordinator's `commit_deposit` runs for a parent session, a child session's subagent files may already be on disk. A directory-level `git add sessions/<parent>/` would sweep the child's files into the parent's commit, leaving nothing for the child's own `commit_deposit` to record. Explicit `git add sessions/<sub>/manifest.json sessions/<sub>/transcript.jsonl[.zst]` isolates each session's commit to its own files regardless of file-write order.
+
+- **Output volume**: parallel mode prints `holotype ingest: N candidate(s) across W worker(s)` at start of cycle. Per-session log lines (`new`, `updated`) still print in submission order via the coordinator. `--quiet` suppresses both.
+
+### Performance
+
+The parallel path is most impactful on workloads where per-session CPU + I/O dominates: encrypted-bulk-initial first-time backfill, large transcripts (multi-MB sessions with subagents), and zstd-compressed deposits. Expected speedup on Apple Silicon M-series with 8 cores: 4-6× on bulk-initial, 2-3× on incremental ingest of many small new sessions. Steady-state daily ingests of <10 sessions see negligible benefit (and waste a small fixed cost spinning up workers); for those, `--workers 1` is fine.
+
+### Compatibility
+
+- Public CLI contract is unchanged. `python scripts/ingest.py` (no args) still works exactly as it did in v1.x; `--workers` defaults to auto, which falls back to serial when `os.cpu_count()` returns 1.
+- Archive format is unchanged. `manifest_version` stays at 4. Existing archives ingest without any migration.
+- Selftest covers both paths: an explicit `--workers 4` run is asserted to produce the same per-session-commit shape, pass `verify.py`, and serve FTS queries.
+
+---
+
 ## [1.2.0] — 2026-05-22
 
 Bulk-ingest performance improvements. Three orthogonal optimizations land together because they target the same workload (first-time backfill of an existing host-CLI history) and share testing infrastructure.

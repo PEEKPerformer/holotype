@@ -317,8 +317,27 @@ def commit_deposit(
     status: str,
     sign_commits: bool = False,
 ) -> str | None:
+    """Commit one session's deposit files.
+
+    Adds the manifest + transcript by *explicit path*, not by directory.
+    This matters under the v2.0 parallel-worker path: workers write
+    files concurrently and a subagent's files can land on disk before
+    its parent session's commit_deposit runs. A directory-level
+    `git add sessions/<parent>/` would then sweep the subagent files
+    into the parent's commit, leaving nothing for the subagent's own
+    commit. Explicit per-file add isolates each session's commit to
+    its own files.
+    """
     rel = f"sessions/{candidate.archive_subpath}"
-    run_git(archive, "add", rel)
+    sess_dir = archive / "sessions" / candidate.archive_subpath
+    # Build an explicit path list. The transcript may be .jsonl or
+    # .jsonl.zst depending on the archive's compression mode; glob
+    # picks up whichever exists.
+    paths_to_add = [f"{rel}/manifest.json"]
+    for tf in ("transcript.jsonl", "transcript.jsonl.zst"):
+        if (sess_dir / tf).exists():
+            paths_to_add.append(f"{rel}/{tf}")
+    run_git(archive, "add", *paths_to_add)
     diff = run_git(archive, "diff", "--cached", "--quiet")
     if diff.returncode == 0:
         return None
@@ -492,6 +511,80 @@ def update_index(
     )
 
 
+def _parallel_worker_unpack(args_tuple):
+    """Module-level adapter so ProcessPoolExecutor.map can call the worker.
+
+    map() only passes one argument per call; we pack the worker's
+    fixed-config + per-task tuple here so each pool task can unpack
+    it cleanly. Lives at module top so it's picklable.
+    """
+    archive_str, source_name, candidate_dict, compression, compression_level = args_tuple
+    from holotype.parallel import process_candidate_worker
+    return process_candidate_worker(
+        archive_str, source_name, candidate_dict,
+        compression=compression, compression_level=compression_level,
+    )
+
+
+def _drain_result(
+    result: dict,
+    source_cls: type[Source],
+    candidate: DepositCandidate,
+    conn,
+    archive: Path,
+    counts: dict,
+    committed: list,
+    bulk_initial: list,
+    migrations: list,
+    bulk_fts_rows: list,
+    sign_commits: bool,
+    is_bulk_initial: bool,
+) -> None:
+    """Consume one worker result and drive the SQLite + git serial path.
+
+    Identical bucketing to the serial path; lives separately because
+    ProcessPoolExecutor.map yields plain dicts back, and we want one
+    place that knows how to translate those into bucket updates and
+    per-session commits.
+    """
+    status = result["status"]
+    counts[status] = counts.get(status, 0) + 1
+
+    if status == "error":
+        sys.stderr.write(
+            f"holotype: worker failed on {candidate.archive_subpath}: "
+            f"{result.get('error')}\n"
+        )
+        return
+
+    if status not in ("new", "updated"):
+        return
+
+    transcript_changed = result["transcript_changed"]
+
+    if transcript_changed:
+        if is_bulk_initial:
+            update_index(
+                conn, archive, source_cls, candidate, git_commit=None,
+                transcript_changed=True,
+                out_fts_rows=bulk_fts_rows,
+            )
+            bulk_initial.append((source_cls, candidate))
+        else:
+            commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
+            update_index(
+                conn, archive, source_cls, candidate, commit,
+                transcript_changed=True,
+            )
+            committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
+    else:
+        update_index(
+            conn, archive, source_cls, candidate, git_commit=None,
+            transcript_changed=False,
+        )
+        migrations.append((source_cls, candidate))
+
+
 def acquire_lock(archive: Path):
     lock_path = archive / ".holotype" / ".lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,6 +645,22 @@ def main(argv: list[str] | None = None) -> int:
             "without --bulk-initial."
         ),
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help=(
+            "Number of parallel deposit workers (default 0 = auto, "
+            "min(os.cpu_count(), 8)). 1 forces serial mode (useful for "
+            "debugging). Each worker is an independent process doing "
+            "the per-session hash + compress + manifest-build + "
+            "transcript-write. The coordinator serializes SQLite + git "
+            "writes. Workers don't share state with each other or with "
+            "the coordinator — they each re-open zstd subprocesses, "
+            "re-import Source classes, and apply live-file safety on "
+            "their own slice."
+        ),
+    )
     args = p.parse_args(argv)
 
     archive = find_archive(args.archive)
@@ -609,53 +718,106 @@ def main(argv: list[str] | None = None) -> int:
         bulk_fts_rows: list[tuple] = []
         compression_level = "fast" if args.fast_compress else "archival"
 
+        # Resolve worker count. 0 = auto. 1 = explicit serial mode.
+        # Anything > 1 runs the parallel coordinator path.
+        if args.workers == 0:
+            import os as _os
+            args.workers = min(_os.cpu_count() or 4, 8)
+        if args.dry_run:
+            args.workers = 1  # dry-run skips the work, no point parallelizing
+
         with open_index(index_path) as conn:
-            for source_cls, candidate in candidates:
-                if args.dry_run:
-                    counts["new"] += 1
-                    continue
-
-                status, session_id, transcript_changed = deposit_one(
-                    archive, source_cls, candidate, compression=compression,
-                    compression_level=compression_level,
+            if args.workers > 1 and not args.dry_run:
+                # Parallel path: dispatch all candidates to a worker
+                # pool. Workers write files + manifests to disk and
+                # return results; coordinator drains in order and runs
+                # the (single-writer) SQLite + git path serially.
+                from concurrent.futures import ProcessPoolExecutor
+                from holotype.parallel import (
+                    candidate_to_dict,
+                    process_candidate_worker,
                 )
-                counts[status] = counts.get(status, 0) + 1
 
-                if status not in ("new", "updated"):
-                    continue
+                if not args.quiet:
+                    print(f"holotype ingest: {len(candidates)} candidate(s) across {args.workers} worker(s)")
 
-                if transcript_changed:
-                    if args.bulk_initial:
-                        # Defer the git commit. Index `messages` rows
-                        # now; collect FTS rows in `bulk_fts_rows` for a
-                        # single bulk-insert at end-of-cycle.
+                # Submit in order; results stream back in same order via
+                # executor.map.
+                cls_by_name = {cls.name: cls for cls, _ in candidates}
+                submissions = [
+                    (
+                        str(archive),
+                        cls.name,
+                        candidate_to_dict(cand),
+                    )
+                    for cls, cand in candidates
+                ]
+
+                executor = ProcessPoolExecutor(max_workers=args.workers)
+                try:
+                    results_iter = executor.map(
+                        _parallel_worker_unpack,
+                        [
+                            (s[0], s[1], s[2], compression, compression_level)
+                            for s in submissions
+                        ],
+                    )
+                    for (cls, candidate), result in zip(candidates, results_iter):
+                        _drain_result(
+                            result, cls, candidate, conn, archive,
+                            counts, committed, bulk_initial, migrations,
+                            bulk_fts_rows, sign_commits, args.bulk_initial,
+                        )
+                        # SQLite commit cadence — same as serial path.
+                        if result["status"] in ("new", "updated"):
+                            pending_since_commit += 1
+                            if pending_since_commit >= INDEX_COMMIT_BATCH:
+                                conn.commit()
+                                pending_since_commit = 0
+                finally:
+                    executor.shutdown(wait=True, cancel_futures=True)
+            else:
+                # Serial path: unchanged from v1.2 / earlier.
+                for source_cls, candidate in candidates:
+                    if args.dry_run:
+                        counts["new"] += 1
+                        continue
+
+                    status, session_id, transcript_changed = deposit_one(
+                        archive, source_cls, candidate, compression=compression,
+                        compression_level=compression_level,
+                    )
+                    counts[status] = counts.get(status, 0) + 1
+
+                    if status not in ("new", "updated"):
+                        continue
+
+                    if transcript_changed:
+                        if args.bulk_initial:
+                            update_index(
+                                conn, archive, source_cls, candidate, git_commit=None,
+                                transcript_changed=True,
+                                out_fts_rows=bulk_fts_rows,
+                            )
+                            bulk_initial.append((source_cls, candidate))
+                        else:
+                            commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
+                            update_index(
+                                conn, archive, source_cls, candidate, commit,
+                                transcript_changed=True,
+                            )
+                            committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
+                    else:
                         update_index(
                             conn, archive, source_cls, candidate, git_commit=None,
-                            transcript_changed=True,
-                            out_fts_rows=bulk_fts_rows,
+                            transcript_changed=False,
                         )
-                        bulk_initial.append((source_cls, candidate))
-                    else:
-                        # Genuine deposit or content update — per-session commit.
-                        commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
-                        update_index(
-                            conn, archive, source_cls, candidate, commit,
-                            transcript_changed=True,
-                        )
-                        committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
-                else:
-                    # Manifest-only refresh — defer the git commit; do the
-                    # index work now (cheap because we skip FTS rebuild).
-                    update_index(
-                        conn, archive, source_cls, candidate, git_commit=None,
-                        transcript_changed=False,
-                    )
-                    migrations.append((source_cls, candidate))
+                        migrations.append((source_cls, candidate))
 
-                pending_since_commit += 1
-                if pending_since_commit >= INDEX_COMMIT_BATCH:
-                    conn.commit()
-                    pending_since_commit = 0
+                    pending_since_commit += 1
+                    if pending_since_commit >= INDEX_COMMIT_BATCH:
+                        conn.commit()
+                        pending_since_commit = 0
 
             # Final batch flush.
             if pending_since_commit:

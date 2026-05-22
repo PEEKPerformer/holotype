@@ -546,6 +546,51 @@ def main(argv: list[str] | None = None) -> int:
         expect("schema v4" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
 
+        step("--workers > 1 (parallel path) produces a clean archive")
+        # Run a fresh ingest entirely through the parallel coordinator
+        # and confirm: per-session commits land in expected count, hash
+        # chain verifies clean, FTS still works.
+        par_archive = tmp / "archive-parallel"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(par_archive),
+            "--remote-url", "",
+            "--remote-kind", "none",
+            "--compression", "none",
+        )
+        expect(result.returncode == 0, f"parallel init failed: {result.stderr}")
+        par_source = materialize_source(tmp / "par-source-parent")
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(par_archive),
+            "--source", str(par_source),
+            "--workers", "4",
+        )
+        expect(result.returncode == 0,
+               f"--workers=4 ingest failed: {result.stderr}\n{result.stdout}")
+        expect("new=3" in result.stdout,
+               f"--workers=4 expected new=3:\n{result.stdout}")
+        # All 3 sessions should each get their own deposit commit (parallel
+        # mode shouldn't accidentally fold subagent files into the parent
+        # commit — that was a real race we patched in commit_deposit).
+        par_log = subprocess.run(
+            ["git", "-C", str(par_archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        par_deposit_lines = [ln for ln in par_log.strip().split("\n") if "deposit:" in ln]
+        expect(len(par_deposit_lines) == 3,
+               f"--workers=4 should produce 3 deposit commits, got {len(par_deposit_lines)}:\n{par_log}")
+        # Verify the archive's hash chain.
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(par_archive))
+        expect(result.returncode == 0, f"parallel-ingested archive failed verify: {result.stderr}")
+        # FTS still works.
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "entanglement",
+            "--archive", str(par_archive), "--json",
+        )
+        parsed = json.loads(result.stdout)
+        expect(len(parsed) > 0, "FTS query returned 0 hits after parallel ingest")
+
         step("--fast-compress + --bulk-initial path is exercised end-to-end")
         fc_archive = tmp / "archive-fast-compress"
         result = run_script(

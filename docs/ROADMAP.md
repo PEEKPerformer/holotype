@@ -25,37 +25,15 @@ Identified as the dominant cost in encrypted bulk-initial: per-file `git-crypt c
 
 ---
 
-## v2 candidates (architectural)
+## v2 candidates — SHIPPED in v2.0.0
 
-### Parallelize per-session ingest
+The v2 parallel-workers design shipped in `v2.0.0`. See `CHANGELOG.md` for the full release notes. Final shape:
 
-The hot path is currently single-process: hash → compress → encrypt → manifest write → SQLite upsert → git stage → commit. The first three are CPU-bound and independent per session; only the SQLite + git steps need serialization.
-
-**Plan**: Stage pipeline:
-
-```
-[Pool of N workers, parallel] → [Single coordinator]
-- read JSONL                     - write manifest.json + transcript
-- compute sha256                 - git add + commit (or accumulate
-- compress (zstd)                  for bulk-initial)
-- (re)encrypt for git-crypt      - upsert sessions row + FTS insert
-  if applicable
-- parse Source metadata
-- build manifest dict
-```
-
-The workers produce `(manifest, transcript_bytes, compressed_bytes)` tuples; the coordinator drains them in order and does serialized writes. On an M-series with 8 performance cores, plausibly 4-6× total throughput.
-
-**Expected impact**: 4-6× on bulk-ingest workloads. Most user-visible improvement.
-
-**Risk**: Architecturally invasive. Needs a real design doc before code:
-
-- How does live-file safety (re-check mtime after read) interact with worker pool latency?
-- How do per-session commits interleave when workers finish out of order?
-- What happens to git-crypt filter forks under parallel `git add`?
-- How does the SIGINT-during-ingest path stay clean?
-
-This is the right v2 lift. Don't ship it as a v1.x patch.
+- Workers do hash + compress + manifest-build + transcript-write each in their own process.
+- Coordinator drains worker results in submission order; runs SQLite + git serially.
+- Workers handle live-file safety themselves (each does its own stat/restat).
+- `commit_deposit` was updated to add files by explicit path (not directory) so concurrent file writes don't conflate subagent commits into parent-session commits.
+- Selftest covers both serial (`--workers 1`) and parallel (`--workers 4`) paths.
 
 ---
 
