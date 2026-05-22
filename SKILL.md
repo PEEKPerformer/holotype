@@ -18,7 +18,39 @@ Before depositing anything, the user must consciously choose **where the archive
 
 **Step 1 — Archive location.** Ask with default suggestion `~/Documents/holotype-archive`. Expand `~` to an absolute path before passing to the script.
 
-**Step 2 — Privacy decision: remote or local-only?** This is the critical decision. State explicitly to the user, *before* offering options:
+**Step 2 — Storage projection (consent).** Before any other decisions, the user should see what this archive will cost on disk. Run:
+
+```bash
+python scripts/usage_estimate.py --json
+```
+
+The script walks each registered Source's default paths (e.g. `~/.claude/projects/`, `~/.codex/sessions/`) and projects forward from current usage. Show the user:
+
+> "Based on N session file(s) across the last D days of host-CLI history (totaling X GB), expect roughly Y MB/day → Z GB/month of uncompressed deposits. With zstd compression on (default when available), JSONL typically gets 30–60% smaller — content-dependent."
+
+If `combined.no_data` is true (fresh host-CLI install), say so honestly — projection unavailable, defaults are fine, projection can be re-checked later via `scripts/usage_estimate.py`.
+
+Then decide compression. Default is **`auto`**: zstd if the binary is on PATH, plain JSONL otherwise. Detect by:
+
+```bash
+command -v zstd
+```
+
+- **zstd is installed**: tell the user "Compression will be enabled (zstd available on your system)." Proceed with `--compression auto` (resolves to `zstd`).
+- **zstd is NOT installed**: offer to install it on their behalf so they get the storage savings. Detect the package manager and propose the exact command:
+  - macOS with Homebrew: `brew install zstd`
+  - Debian/Ubuntu: `sudo apt install zstd`
+  - Fedora: `sudo dnf install zstd`
+  - Arch: `sudo pacman -S zstd`
+  - Windows: `winget install zstd` or `scoop install zstd`
+
+  Ask: "zstd isn't installed but I can `brew install zstd` for you so this archive gets compressed deposits (~30–60% smaller). Install? (Y/n)" — never run the install without explicit confirmation. If yes, run the install, then proceed with compression on. If no, fall back to `--compression none` and continue without compression.
+
+If `low_confidence` is true (date span < 7 days), warn the user the projection is based on a short window and is approximate.
+
+Also offer to change archive location at this point (e.g., for a user with a small system disk who wants the archive on an external drive — go back to Step 1) or to cancel.
+
+**Step 3 — Privacy decision: remote or local-only?** This is the critical decision. State explicitly to the user, *before* offering options:
 
 > "The archive will contain verbatim Claude Code transcripts, including any file contents, command output, environment details, and tool results Claude saw during sessions. If you add a git remote, all of that data will be pushed to that remote when you sync. Choose carefully."
 
@@ -29,19 +61,19 @@ Then offer:
 - **Synology or local-network git** — middle ground; data stays on hardware you own.
 - **Other URL** — user pastes the remote.
 
-**Step 3 — If a remote was chosen, get the URL.** For GitHub, also ask for org/account and repo name and offer to `gh repo create --private` it on the fly (but only if the user says "yes" — never silently).
+**Step 4 — If a remote was chosen, get the URL.** For GitHub, also ask for org/account and repo name and offer to `gh repo create --private` it on the fly (but only if the user says "yes" — never silently).
 
-**Step 4 — Confirm before writing.** Show a summary:
-> "I'll create the archive at `<path>` as a new git repo. Remote: `<url-or-none>`. Push policy: manual (never automatic). Proceed?"
+**Step 5 — Confirm before writing.** Show a summary:
+> "I'll create the archive at `<path>` as a new git repo. Compression: `<auto|none|zstd>` (resolves to `<zstd|none>` on this system). Remote: `<url-or-none>`. Push policy: manual (never automatic). Proceed?"
 
-**Step 5 — Run init.** Call:
+**Step 6 — Run init.** Call:
 ```bash
-python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none>
+python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none> --compression <auto|none|zstd>
 ```
 
-The script writes `<archive>/.holotype/config.json`, drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive.
+The script writes `<archive>/.holotype/config.json` (including the *resolved* compression mode — `auto` is replaced with the concrete choice), drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive. If `--compression zstd` is forced but zstd isn't on PATH, init exits 2; `--compression auto` falls back to plain JSONL with a notice.
 
-**Step 6 — Host-CLI retention check.** Holotype's forensic-completeness promise has a hole if the host CLI prunes session transcripts before holotype can deposit them. Claude Code's default `cleanupPeriodDays` is 30; we want effectively-never. Run:
+**Step 7 — Host-CLI retention check.** Holotype's forensic-completeness promise has a hole if the host CLI prunes session transcripts before holotype can deposit them. Claude Code's default `cleanupPeriodDays` is 30; we want effectively-never. Run:
 
 ```bash
 python scripts/configure-host-retention.py --check-only
@@ -58,7 +90,7 @@ python scripts/configure-host-retention.py
 
 If the script reports `already-ok` or `skipped-not-installed`, no action needed.
 
-**Step 7 — Background-tick opt-in (macOS only).** Ask:
+**Step 8 — Background-tick opt-in (macOS only).** Ask:
 
 > "Claude Code sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses. It is local-only and never pushes to a remote. Install? (Y/n)"
 
@@ -69,14 +101,14 @@ python scripts/install-launchd.py --archive <abs-path>
 
 If on Linux or Windows, skip this step and tell the user the equivalent can be set up later via systemd user unit (Linux) or Task Scheduler (Windows).
 
-**Step 8 — First ingest.** Run an initial deposit to seed the archive from the existing host-CLI session stores:
+**Step 9 — First ingest.** Run an initial deposit to seed the archive from the existing host-CLI session stores:
 ```bash
 python scripts/ingest.py --archive <abs-path>
 ```
 
 Report the count of sessions deposited.
 
-**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes, yes" to each. The point is informed consent on the remote decision and on modifying the host CLI's settings, not speed.
+**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes, yes" to each. The point is informed consent on the storage cost, the remote decision, and on modifying the host CLI's settings — not speed.
 
 ## Where things live (after setup)
 
@@ -117,7 +149,8 @@ Read these before any operation:
 
 | Want to... | Run |
 |------------|-----|
-| First-time setup | Conduct wizard, then `python scripts/init.py --path <p> --remote-url <u> --remote-kind <k>` |
+| First-time setup | Conduct wizard, then `python scripts/init.py --path <p> --remote-url <u> --remote-kind <k> --compression <auto|none|zstd>` |
+| Estimate storage cost from existing host-CLI history | `python scripts/usage_estimate.py` |
 | Check / bump host-CLI retention | `python scripts/configure-host-retention.py [--check-only]` |
 | Install macOS background tick (after setup) | `python scripts/install-launchd.py --archive <p>` |
 | Deposit new sessions (preferred — from the rsync backup) | `python scripts/ingest.py --source ~/Documents/Claude-Backups` |
