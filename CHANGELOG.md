@@ -2,6 +2,22 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-05-22
+
+Two bug fixes surfaced by end-to-end integration testing of the v1.2 / v2.0 releases.
+
+### Fixed
+
+- **`ingest.py` auto-push now pushes each bulk-initial chunk individually instead of bundling them.** The v1.2 auto-chunking creates N local commits sized under `--max-pack-gib`, but the previous end-of-cycle `git push origin HEAD` packed ALL unpushed commits into one stream — `pack-objects` builds a single pack from all unpushed commits, so the wire pack size was the SUM of the local chunks. This defeated the chunking and reproduced the very failure mode (GitHub's 2 GiB pack rejection) the chunking was supposed to prevent. The fix pushes each chunk immediately after committing it; the first chunk creates/upgrades the tracking branch (`push -u origin main`), subsequent chunks fast-forward. The end-of-cycle push is skipped when per-chunk pushes already covered HEAD. If a chunk's push fails, subsequent chunks are NOT attempted (they would fail until the prior one lands); the user can re-run ingest or use `scripts/repush_chunked.py` to retry.
+
+- **`init.py` "Next steps" output no longer contradicts `--auto-push`.** Previously printed `"only when you explicitly want to publish — never auto-pushed"` even when `--auto-push` was on. Now config-aware: when auto-push is enabled, says so explicitly and shows the manual command as an option rather than the only path. When auto-push is off, prints the manual command and a note to re-init with `--auto-push` to flip the default.
+
+### Test coverage
+
+- Selftest gains a per-chunk auto-push assertion: forces multiple chunks with `--max-pack-gib 0.000001` against a local bare-repo remote, then verifies the bare remote ends up with all chunk commits AND that local HEAD matches remote HEAD (no unpushed work).
+
+---
+
 ## [2.0.0] — 2026-05-22
 
 Parallel worker pool for per-session ingest. The architectural lift that the v1.x perf work pointed toward, shipped as a major version because the ingest pipeline's internal shape changed even though the public CLI contract didn't.

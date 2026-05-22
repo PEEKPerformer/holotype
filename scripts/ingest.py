@@ -827,6 +827,15 @@ def main(argv: list[str] | None = None) -> int:
         # --max-pack-gib, auto-chunk by project directory into N
         # commits — same shape as repush_chunked.py but proactive.
         # Single commit when total fits comfortably.
+        #
+        # When auto_push is on AND we chunked, push each chunk
+        # IMMEDIATELY after committing it. Bundling all chunks into one
+        # end-of-cycle `git push origin HEAD` defeats the chunking —
+        # `pack-objects` builds a single pack from all unpushed commits,
+        # so the wire pack size is the SUM of the local chunks, which
+        # is exactly the case the chunking was supposed to prevent.
+        # Per-chunk push keeps each push payload ≤ --max-pack-gib.
+        bulk_chunks_pushed = False
         if bulk_initial:
             bi_candidates = [c for _, c in bulk_initial]
             target_bytes = int(args.max_pack_gib * (1024 ** 3))
@@ -870,6 +879,8 @@ def main(argv: list[str] | None = None) -> int:
                     for rel in chunk:
                         chunk_for_project[Path(rel).name] = ci
 
+                will_push_per_chunk = auto_push and bool(remote_url) and not args.dry_run
+
                 for ci, chunk in enumerate(chunks, 1):
                     CHUNK_ADD = 500
                     for j in range(0, len(chunk), CHUNK_ADD):
@@ -897,6 +908,29 @@ def main(argv: list[str] | None = None) -> int:
                         committed.append(
                             f"  bulk-initial part {ci}/{len(chunks)}: {sha}"
                         )
+
+                    if will_push_per_chunk:
+                        if not args.quiet:
+                            print(f"  pushing chunk {ci}/{len(chunks)} to {remote_url}...")
+                        # First chunk creates/upgrades the tracking
+                        # branch; subsequent chunks fast-forward.
+                        push_args = ["push", "-u", "origin", "main"] if ci == 1 else ["push", "origin", "HEAD"]
+                        push = run_git(archive, *push_args)
+                        if push.returncode == 0:
+                            if not args.quiet:
+                                print(f"  push chunk {ci}/{len(chunks)} OK")
+                            bulk_chunks_pushed = True
+                        else:
+                            sys.stderr.write(
+                                f"holotype: auto-push of chunk {ci}/{len(chunks)} to "
+                                f"{remote_url} failed (deposits safe locally; rerun ingest "
+                                f"or use `scripts/repush_chunked.py` to retry).\n"
+                            )
+                            if push.stderr:
+                                sys.stderr.write(push.stderr)
+                            # Stop pushing further chunks — subsequent
+                            # ones would fail until this one lands.
+                            will_push_per_chunk = False
 
             # Backfill sessions.git_commit + bulk-insert FTS rows in
             # one transaction.
@@ -949,7 +983,13 @@ def main(argv: list[str] | None = None) -> int:
         # covers everything. Push failure does NOT fail the ingest —
         # local deposits are already committed and a future ingest or
         # manual push will retry.
-        if any_changes and auto_push and remote_url and not args.dry_run:
+        #
+        # Skip if bulk-initial chunking already pushed per chunk —
+        # otherwise `pack-objects` would bundle ALL local commits into
+        # one pack (HEAD includes all unpushed commits), defeating the
+        # chunking. A no-op `git push origin HEAD` would be harmless
+        # but noisy; skip it explicitly.
+        if any_changes and auto_push and remote_url and not args.dry_run and not bulk_chunks_pushed:
             if not args.quiet:
                 print(f"  pushing to {remote_url}...")
             push = run_git(archive, "push", "origin", "HEAD")

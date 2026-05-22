@@ -629,6 +629,64 @@ def main(argv: list[str] | None = None) -> int:
         parsed = json.loads(result.stdout)
         expect(len(parsed) > 0, "FTS query returned 0 hits after deferred-FTS bulk-initial")
 
+        step("auto-push pushes EACH bulk-initial chunk individually (not bundled)")
+        # The v1.2 auto-chunking creates N local commits but a single
+        # end-of-cycle `git push origin HEAD` would bundle them all
+        # into one pack, defeating the chunking. v1.2.1 pushes each
+        # chunk immediately after committing it. Test: bare remote +
+        # auto-push + tiny --max-pack-gib forces multiple chunks; the
+        # remote should receive ALL of them.
+        cp_bare = tmp / "bare-chunked-push.git"
+        subprocess.run(["git", "init", "--bare", str(cp_bare)], check=True, capture_output=True)
+        cp_archive = tmp / "archive-chunked-push"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(cp_archive),
+            "--remote-url", f"file://{cp_bare}",
+            "--remote-kind", "other",
+            "--compression", "none",
+            "--auto-push",
+        )
+        expect(result.returncode == 0, f"chunked-push init failed: {result.stderr}")
+        cp_source = materialize_source(tmp / "cp-source-parent")
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(cp_archive),
+            "--source", str(cp_source),
+            "--bulk-initial",
+            "--max-pack-gib", "0.000001",
+        )
+        expect(result.returncode == 0,
+               f"chunked auto-push ingest failed: {result.stderr}\n{result.stdout}")
+        expect("pushing chunk 1/" in result.stdout,
+               f"expected per-chunk push log line:\n{result.stdout}")
+        expect("push chunk 1/" in result.stdout and "OK" in result.stdout,
+               f"expected per-chunk OK confirmation:\n{result.stdout}")
+        # The bare remote should have ALL chunked commits — verify by
+        # cloning and counting bulk-initial-part commits.
+        cp_clone = tmp / "chunked-push-clone"
+        subprocess.run(["git", "clone", "--quiet", f"file://{cp_bare}", str(cp_clone)],
+                       check=True, capture_output=True)
+        clone_log = subprocess.run(
+            ["git", "-C", str(cp_clone), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        chunk_commits_on_remote = [ln for ln in clone_log.strip().split("\n")
+                                    if "bulk-initial part" in ln]
+        expect(len(chunk_commits_on_remote) >= 2,
+               f"expected >= 2 chunk commits on remote, got {len(chunk_commits_on_remote)}:\n{clone_log}")
+        # Local HEAD should match remote HEAD — no unpushed commits.
+        local_head = subprocess.run(
+            ["git", "-C", str(cp_archive), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        remote_head = subprocess.run(
+            ["git", "-C", str(cp_clone), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        expect(local_head == remote_head,
+               f"local HEAD {local_head[:8]} != remote HEAD {remote_head[:8]} (chunks didn't all push)")
+
         step("--bulk-initial auto-chunks when projected pack exceeds --max-pack-gib")
         # Force chunking with a tiny target so even our small synthetic
         # archive trips multiple chunks (each project dir becomes its

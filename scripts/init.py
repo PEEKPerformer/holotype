@@ -703,8 +703,13 @@ def init_archive(args: argparse.Namespace) -> int:
     print("Next steps:")
     print("  - To deposit sessions:  python scripts/ingest.py")
     if args.remote_url:
-        print("  - To push to remote:    git -C", archive, "push -u origin main")
-        print("    (only when you explicitly want to publish — never auto-pushed)")
+        if args.auto_push:
+            print(f"  - Auto-push to {args.remote_url} fires after every ingest.")
+            print("    To push manually anyway:  git -C", archive, "push -u origin main")
+        else:
+            print(f"  - Auto-push is OFF. To push manually:")
+            print(f"    git -C {archive} push -u origin main")
+            print("    Re-init with --auto-push to flip the default.")
     return 0
 
 
