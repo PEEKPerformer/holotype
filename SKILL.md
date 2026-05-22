@@ -253,21 +253,38 @@ If on Linux or Windows, skip this step and tell the user the equivalent can be s
 **Step 9a — First-ingest scale warning.** *Before* launching the first ingest, surface the realistic cost. Re-run `scripts/usage_estimate.py --json` to get current numbers and tell the user something like:
 
 > "Your existing host-CLI history is ~N session files totaling ~X GB. The first ingest will:
->   * Hash each transcript (fast)
+>   * Hash each transcript (fast — Apple Silicon SHA-NI / x86 SHA-NI)
 >   * Compress each (zstd, fast)
->   * Encrypt each via git-crypt (if encryption is on — fast)
->   * Commit each to the archive (slowest step — ~50 ms each baseline; ~300 ms each with GPG signing on)
+>   * Encrypt each via git-crypt (if encryption is on)
+>   * Commit each to the archive
 >   * Push to the remote at the end (if auto-push is on — pushes ~Y GB of encrypted blobs)
 >
-> Estimated wall time: ~Z minutes. Subsequent ingests are fast (only new sessions get processed)."
+> Realistic ETAs (calibrate from the matrix below — choose the row that matches your config):"
+
+```
+┌──────────────────┬────────────┬────────────┬────────────────────────────────────────────────┐
+│   Configuration  │ Per-session│ Bulk-init  │                     Notes                      │
+├──────────────────┼────────────┼────────────┼────────────────────────────────────────────────┤
+│ Plain, no sign   │ ~3-5 min   │ ~1-2 min   │ Dominated by SQLite + git plumbing.            │
+│ Plain + sign     │ ~25-35 min │ ~3-5 min   │ Per-session: ~300 ms GPG sig × N commits.      │
+│ Encrypted        │ ~30-40 min │ ~20-30 min │ git-crypt forks per-file at `git add` time.    │
+│                  │            │            │ Bulk-initial does NOT save the filter cost.    │
+│ Encrypted + sign │ ~50-90 min │ ~20-30 min │ Encryption dominates; signing is one extra sig │
+│                  │            │            │ in bulk-initial mode.                          │
+└──────────────────┴────────────┴────────────┴────────────────────────────────────────────────┘
+```
+
+> Numbers above are for ~6000-session archives on an M-series Mac. Scale linearly with session count. Subsequent (steady-state) ingests are fast in all configurations — only new sessions get processed.
+>
+> *Why encrypted bulk-initial isn't faster*: git-crypt invokes one fork+exec of its clean filter per file at `git add` time. The bulk-initial combined commit doesn't avoid this per-file filter cost — it only avoids the per-commit GPG signing cost. A future v1.2 may use git's process-filter protocol to make encrypted bulk-initial much faster; for now, plan for the table above.
 
 Then offer the user a choice about commit topology for THIS first ingest:
 
 > "Per-session commits or one combined commit for the initial backfill?
->   * **Per-session** (default): one git commit per deposited session. Granular `git log sessions/X/Y/Z/` history but slow at scale — 6000 commits at 300 ms each = 30+ min just for signing.
->   * **Bulk-initial**: one combined `bulk-initial: N sessions ingested` commit for all backfilled sessions. Loses per-session ordering inside the initial backfill (they all share one commit) but signs once instead of N times. Future per-session ingests are unaffected.
+>   * **Per-session** (default): one git commit per deposited session. Granular `git log sessions/X/Y/Z/` history. Slow with signing on (each commit signs separately).
+>   * **Bulk-initial**: one combined `bulk-initial: N sessions ingested` commit for all backfilled sessions. Loses per-session ordering inside the initial backfill (they all share one commit). Saves the per-commit-sign cost (one sig instead of N). Does NOT save the per-file encryption cost.
 >
-> Recommended for a fresh setup with hundreds-plus sessions to backfill: **bulk-initial**. Recommended otherwise: **per-session**."
+> Recommended for a fresh setup with hundreds-plus sessions to backfill AND signing on: **bulk-initial**. For smaller archives or when signing is off: **per-session** is fine."
 
 If they pick bulk-initial, pass the `--bulk-initial` flag.
 

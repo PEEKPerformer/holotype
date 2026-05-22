@@ -2,6 +2,22 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] — 2026-05-22
+
+### Changed
+
+- **Wizard Step 9a — first-ingest ETA matrix replaces the old "minutes" estimate.** The previous copy was written before encryption was added and didn't account for git-crypt's per-file clean-filter forks at `git add` time. New ETA table is conservative and honest about the four common configurations (plain vs. encrypted, signed vs. unsigned, per-session vs. bulk-initial). Encrypted bulk-initial is now correctly framed as ~20-30 min for ~6000 sessions on M-series, not "a few minutes." Includes a short note on *why* encrypted bulk-initial doesn't save the encryption cost (filter forks happen at `git add`, regardless of how many commits the cycle produces).
+
+### Added
+
+- **`docs/ROADMAP.md`** — captures v1.2 and v2 candidate work with honest tradeoffs. v1.2: deferred FTS rebuild on bulk ingest (~1.3×), `--fast-compress` flag pairing with `--bulk-initial` (~1.1× overall, ~2-3× on the compress step), `PRAGMA mmap_size`. v2: parallelize per-session ingest via worker pool + serialized coordinator (~4-6×, needs design doc). Explicit non-goals: GPU acceleration (workload isn't GPU-shaped), in-process git-crypt format reimplementation (crypto surface-area expansion not worth the speedup for a forensic tool), auto-export of git-crypt key at init (creates false sense of "init handled it").
+
+### Investigated, filed as not-available
+
+- **git-crypt process-filter mode.** Diagnosed during the cold-start run as the dominant cost in encrypted bulk-initial. **Confirmed git-crypt 0.8.0 does not implement git's long-running process-filter protocol** — verified via `git-crypt process` (rejected) and `strings $(which git-crypt)` (no protocol packet-line strings). Options recorded in ROADMAP: upstream PR vs. live with it. Decision: lean on the v2 parallel-workers design instead.
+
+---
+
 ## [1.1.4] — 2026-05-22
 
 ### Changed
