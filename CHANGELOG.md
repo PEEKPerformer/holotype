@@ -2,6 +2,20 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] — 2026-05-22
+
+Repository-level JOSS-standard scaffolding. No functional code changes.
+
+### Added
+
+- `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `GOVERNANCE.md`
+- `CITATION.cff` (machine-readable citation metadata; GitHub renders the "Cite this repository" button)
+- `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md` and `.github/PULL_REQUEST_TEMPLATE.md`
+- `docs/ZENODO_SOFTWARE_DOI.md` — guide for the GitHub→Zenodo integration that mints a software DOI per release
+- README: short Research application, How to cite, JOSS readiness, and AI assistance disclosure sections
+
+---
+
 ## [2.0.1] — 2026-05-22
 
 Two bug fixes surfaced by end-to-end integration testing of the v1.2 / v2.0 releases.

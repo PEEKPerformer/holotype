@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+title: "holotype: forensic-grade archival of LLM-driven agent CLI sessions for scientific reproducibility"
+message: "If you use this software in research that you publish, please cite the software as well as the deposited session bundles."
+type: software
+authors:
+  - family-names: Ferland
+    given-names: Brenden
+    affiliation: "Adamson Lab, University of Connecticut"
+    email: brendenferland@gmail.com
+repository-code: "https://github.com/PEEKPerformer/holotype"
+url: "https://github.com/PEEKPerformer/holotype"
+abstract: >-
+  holotype is an agent-CLI-agnostic provenance tool that deposits LLM
+  session transcripts (Claude Code, Codex, Google Antigravity, and
+  user-defined sources) into a content-addressable, hash-chained git
+  archive suitable for citation in scientific publications. Each
+  deposited session is hashed (SHA-256), optionally compressed (zstd)
+  and encrypted (git-crypt), and recorded in a manifest that captures
+  per-session metadata (host CLI version, model identifiers, token
+  totals, wall-clock duration, project-repo git state) needed for
+  reproducibility. Bundled session subsets can be exported as
+  Zenodo-ready deposits with stock-Unix-tool verification procedures
+  (shasum, jq) for paper review independent of the holotype installation.
+keywords:
+  - "large language models"
+  - "scientific reproducibility"
+  - "provenance"
+  - "forensic archive"
+  - "hash chain"
+  - "Claude Code"
+  - "Codex"
+  - "Antigravity"
+  - "research software"
+  - "data availability statement"
+license: MIT
+version: "2.0.2"
+date-released: "2026-05-22"
