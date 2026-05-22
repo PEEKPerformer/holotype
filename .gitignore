@@ -33,3 +33,15 @@ htmlcov/
 # Editor backups
 *~
 *.bak
+
+# Local project memory — design rationale, decision history, scratch
+# context that travels with the working copy but should not be
+# published. Lives at ./memory/, mirrors the structure of Claude
+# Code's auto-memory but stays gitignored so the GitHub repo is the
+# clean public artifact and the rationale stays on the developer's
+# machine.
+/memory/
+
+# Local Claude Code per-project overrides (already gitignored
+# convention, but be explicit here too).
+/.claude/settings.local.json
