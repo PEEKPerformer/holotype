@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "title": "[Paper title] — LLM session transcripts (holotype archive)",
+    "upload_type": "dataset",
+    "description": "<p>holotype paper-bundle deposit supporting the publication: <strong>[Paper title]</strong>.</p><p>This archive contains the verbatim host-CLI JSONL transcripts of the LLM sessions referenced in the paper, a per-session SHA-256 manifest, and a standalone verification procedure (<code>VERIFY.md</code>) that requires only stock Unix tools (<code>shasum</code>, <code>jq</code>).</p><p>Each session can be verified by recomputing the SHA-256 of its <code>transcript.jsonl</code> and comparing against the manifest's <code>sha256</code> field. The bundle's master tarball SHA-256 is provided in the accompanying <code>.sha256</code> sidecar.</p><p>Produced by holotype v[X.Y.Z] (manifest schema v[N]). The holotype tool is open-source at https://github.com/PEEKPerformer/holotype under the MIT license.</p>",
+    "creators": [
+      {
+        "name": "Last, First",
+        "affiliation": "Institution",
+        "orcid": "0000-0000-0000-0000"
+      }
+    ],
+    "keywords": [
+      "LLM",
+      "Claude Code",
+      "provenance",
+      "forensic archive",
+      "scientific reproducibility",
+      "holotype"
+    ],
+    "license": "CC0-1.0",
+    "access_right": "open",
+    "publication_date": "YYYY-MM-DD",
+    "related_identifiers": [
+      {
+        "relation": "isSupplementTo",
+        "identifier": "10.xxxx/PAPER_DOI",
+        "resource_type": "publication-article"
+      },
+      {
+        "relation": "isDerivedFrom",
+        "identifier": "https://github.com/PEEKPerformer/holotype",
+        "resource_type": "software"
+      }
+    ],
+    "communities": [
+      {"identifier": "digital-discovery"}
+    ],
+    "notes": "Verification procedure inside the bundle's VERIFY.md. Requires only stock Unix tools (shasum, jq), no holotype installation needed."
+  }
+}

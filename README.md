@@ -196,7 +196,7 @@ The output directory contains:
 - a `VERIFY.md` for reviewers
 - `<bundle>.tar.gz` + `<bundle>.tar.gz.sha256` if `--tarball` is set
 
-Upload to Zenodo. The DOI Zenodo issues is what you cite in the paper's Data Availability Statement.
+Upload to Zenodo. The DOI Zenodo issues is what you cite in the paper's Data Availability Statement. See [docs/PUBLISHING_TO_ZENODO.md](docs/PUBLISHING_TO_ZENODO.md) for the full Zenodo-side workflow: access modes, license choice, metadata template, sample DAS paragraph, versioning model, and gotchas.
 
 ### 5. Cite in the paper
 
