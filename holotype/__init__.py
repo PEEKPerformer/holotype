@@ -1,3 +1,3 @@
-"""holotype: forensic-grade archival of Claude Code sessions."""
+"""holotype: forensic-grade archival of agent-CLI sessions for scientific reproducibility."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

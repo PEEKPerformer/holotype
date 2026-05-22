@@ -57,11 +57,14 @@ Don't guess from documentation. Inspect actual files on the user's machine. The 
 4. **Map your format's roles to the `MessageInfo` fields:**
    - `role` — `"user"` / `"assistant"` / `"tool_result"` / etc. Whatever your CLI calls these.
    - `timestamp` — ISO-8601 string preferred. If your CLI uses Unix epoch, convert.
-   - `model` — the model ID for assistant turns. None for user turns.
+   - `model` — the model ID for assistant turns. None for user turns. Don't put the *provider* name here (e.g. "openai", "anthropic") — those aren't model IDs and they pollute `manifest.models`.
    - `has_tool_use` — True if this turn contains a tool call.
    - `has_thinking` — True if this turn contains a reasoning / thinking block.
    - `fts_content` — flat text of EVERYTHING in the turn that's searchable. **Do not filter for "noise".** Include tool inputs, tool outputs, thinking blocks, system reminders. Holotype's pitch is forensic completeness; a search index that drops content violates it.
-   - `flags` — set of source-specific markers. `{"compaction"}` if this line is a context-compaction summary. `{"header"}` if it's a session-header pseudo-record that shouldn't count toward `message_count`.
+   - `flags` — set of source-specific markers. `{"compaction"}` if this line is a context-compaction summary. `{"header"}` if it's a header / control / telemetry pseudo-record that shouldn't count toward `message_count` (the timestamps on header-flagged lines still update `first_timestamp`/`last_timestamp` and `session_metadata`/`usage` on them are still harvested — header just means "not a user-visible message").
+   - `usage` — *Optional, manifest v4.* When the host CLI exposes a per-turn token usage block (Claude Code's `message.usage`, Codex's `event_msg.token_count`), put the raw dict here. The manifest scanner aggregates `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` / `cached_input_tokens` automatically. Leave `None` if your CLI doesn't report usage.
+   - `token_count_kind` — *Optional, manifest v4.* `"cumulative"` if the `usage` dict is a running total (Codex's `total_token_usage`), `"delta"` if it's per-turn billing (Claude Code's per-message `usage`), or `None` if no usage was attached. The aggregator prefers a final cumulative reading over summed deltas.
+   - `session_metadata` — *Optional, manifest v4.* For a header-flagged line that carries session-start metadata (Codex's `session_meta` carries the git block at session-start), put a dict here. Recognized keys: `cwd`, `cli_version`, `originator`, `model_provider`, `git_state: {commit, commit_short, branch, dirty, remote, captured_at}`. When `git_state.captured_at == "session-start"`, the manifest will prefer your header-derived state over the deposit-time probe — more accurate, because it was captured by the host CLI at the moment the session ran.
 
 5. **Decide your archive layout** in `DepositCandidate.archive_subpath`. The convention is `<source-name>/<project-or-date>/<session-id>/`. Examples:
    - `claude-code/<project-dir>/<session-uuid>/`
@@ -118,8 +121,13 @@ from holotype.sources.my_cli import MyCliSource
 ALL_SOURCES: list[type[Source]] = [
     ClaudeCodeSource,
     CodexSource,
+    AntigravitySource,
     MyCliSource,  # <-- add here
 ]
 ```
 
 That's the only file outside `holotype/sources/` that you need to touch.
+
+## A note on schema drift
+
+Agent CLIs evolve fast. The Source classes shipped here capture the schemas observed at the time they were written; nothing prevents a vendor from renaming fields, adding new record types, or moving directory paths in the next release. If this guide and the actual filesystem disagree, **trust the filesystem**. The non-negotiables (forensic completeness, append-only, hash-chain integrity) are stable; the mechanics of "where the bytes live and how they're shaped" are not. Patch the Source, update the fixture, re-run selftest.

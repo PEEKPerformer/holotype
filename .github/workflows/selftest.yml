@@ -1,0 +1,48 @@
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  selftest:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install zstd (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zstd jq
+
+      - name: Install zstd (macOS)
+        if: runner.os == 'macOS'
+        run: brew install zstd jq
+
+      - name: Configure git identity (required for commit-driven ingest)
+        run: |
+          git config --global user.email "selftest@holotype.invalid"
+          git config --global user.name "holotype selftest"
+
+      - name: Run selftest
+        run: python scripts/selftest.py --verbose
+
+      - name: Print archive structure on failure
+        if: failure()
+        run: |
+          echo "Leaving any preserved tmpdir intact for log inspection."
+          ls -la /tmp/holotype-selftest-* 2>/dev/null || true

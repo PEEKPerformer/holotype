@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holotype"
+version = "1.0.0"
+description = "Forensic-grade archival of LLM-driven agent CLI sessions for scientific reproducibility"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Brenden Ferland" },
+]
+keywords = [
+    "llm",
+    "claude",
+    "codex",
+    "antigravity",
+    "provenance",
+    "reproducibility",
+    "scientific-archive",
+    "hash-chain",
+    "fts",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Archiving",
+]
+
+# holotype is deliberately stdlib-only. zstd and gpg are optional
+# external binaries (not Python packages) and `jq`/`shasum` are
+# referenced from VERIFY.md for reviewer use.
+dependencies = []
+
+[project.optional-dependencies]
+# No required Python deps. This block exists for future extensions
+# (e.g. typed JSONL parsers, fancier renderers) that should remain opt-in.
+dev = []
+
+[project.urls]
+Homepage = "https://github.com/PEEKPerformer/holotype"
+Issues = "https://github.com/PEEKPerformer/holotype/issues"
+Changelog = "https://github.com/PEEKPerformer/holotype/blob/main/CHANGELOG.md"
+
+[project.scripts]
+# Console-script entry points for the install-as-a-CLI workflow.
+# The skill is the primary entry point (invoked via /holotype in
+# Claude Code etc.) — these scripts are the underlying mechanics
+# exposed for direct use, scripting, and CI.
+holotype-init = "scripts.init:main"
+holotype-ingest = "scripts.ingest:main"
+holotype-verify = "scripts.verify:main"
+holotype-search = "scripts.search:main"
+holotype-cite = "scripts.cite:main"
+holotype-context = "scripts.context:main"
+holotype-reindex = "scripts.reindex:main"
+holotype-usage = "scripts.usage_estimate:main"
+holotype-paper-bundle = "scripts.paper_bundle:main"
+holotype-selftest = "scripts.selftest:main"
+
+[tool.setuptools]
+# Ship both the library package and the scripts directory so the
+# entry points above resolve.
+packages = ["holotype", "holotype.sources"]
+
+[tool.setuptools.package-data]
+holotype = ["py.typed"]
