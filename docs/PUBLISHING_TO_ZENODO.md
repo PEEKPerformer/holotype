@@ -12,13 +12,15 @@ This document covers the Zenodo-side mechanics of depositing a holotype paper bu
 
 ## 1. Choose the access mode before you upload
 
-Zenodo offers three relevant access modes:
+Zenodo's current (post-2023 InvenioRDM migration) model uses a binary **Public / Restricted** visibility, with **Embargo** as a date-bounded sub-option of Restricted. The legacy four-value `access_right` (`open` / `embargoed` / `restricted` / `closed`) still works via the legacy REST API and is what the API recipe in §4 uses.
 
-- **Open** — anyone can download. Use for sessions you're publishing alongside a paper. This is the default for paper-citation deposits.
-- **Embargoed** — files are private until a chosen release date; metadata + DOI are public immediately. Use when the paper is under review and you want a DOI for the manuscript's DAS but don't want reviewers (other than the journal's) accessing the bundle until publication. The embargo date can be set to "embargo until the paper is published" and updated later.
-- **Restricted** — files are private indefinitely; access requests must be approved by you. Use for sessions covered by IP, regulated data, or institutional policy that bars open release. Note: journals like Digital Discovery may not accept Restricted-only DAS deposits — confirm with the journal first.
+In current Zenodo UI terms:
 
-The choice cannot be changed *down* (Open → Restricted is not allowed once published; only the reverse). Pick conservatively and loosen later if your situation permits.
+- **Public** — anyone can download. Use for sessions you're publishing alongside a paper. This is the default for paper-citation deposits.
+- **Restricted (with Embargo)** — files are private until a chosen release date; metadata + DOI are public immediately. Use when the paper is under review and you want a DOI for the manuscript's DAS but don't want reviewers (other than the journal's) accessing the bundle until publication.
+- **Restricted (indefinite)** — files are private indefinitely; access requests must be approved by you. Use for sessions covered by IP, regulated data, or institutional policy that bars open release. Note: journals like Digital Discovery may not accept Restricted-only DAS deposits — confirm with the journal first.
+
+Visibility metadata can be edited after publish in either direction (Public ↔ Restricted, embargo dates can be adjusted). Files themselves are immutable once published; only the access setting changes. Pick the right one at publish time — relying on post-publish edits as a recovery path is fragile.
 
 ## 2. Choose a license for the bundle
 
@@ -37,7 +39,7 @@ This is the most common path; the API is covered separately below.
 1. Sign in at <https://zenodo.org>.
 2. Click **New Upload**.
 3. **Upload type**: select `Dataset` (paper-supporting archives) or `Other` if Zenodo's options don't fit. `Software` is for the tool itself, not the data it produced.
-4. **Files**: drag in either the tarball + its `.sha256` sidecar, OR the unpacked bundle's contents (one file at a time, the UI doesn't accept folders). The tarball is strongly recommended: it's one DOI-referenced artifact rather than N files, and the sidecar gives the reviewer a single hash to verify.
+4. **Files**: drag in either the tarball + its `.sha256` sidecar, OR the unpacked bundle's contents (the UI supports multi-file drag-and-drop). The tarball is strongly recommended anyway: one DOI-referenced artifact rather than N files, and the sidecar gives the reviewer a single hash to verify.
 5. **Communities** (optional): if the paper's journal has a Zenodo community (Digital Discovery, Journal of Open Source Software, etc.), add it now — the deposit will appear in their listing once approved.
 6. **Basic information**:
    - **Title**: `[Paper title] — LLM session transcripts (holotype archive)`
@@ -58,7 +60,9 @@ Once published the DOI is **immutable** — files cannot be changed, only supers
 
 ## 4. Upload via the Zenodo API (for scripted workflows)
 
-If you publish bundles regularly, the API removes UI friction:
+If you publish bundles regularly, the API removes UI friction.
+
+> **Note on API versions**: Zenodo migrated to the InvenioRDM platform in September 2023. The recipe below uses the **legacy `/api/deposit/depositions` API**, which still functions as of mid-2026 but is officially deprecated. The recipe is retained here because it's shorter and well-documented; for new long-lived integrations, prefer the InvenioRDM-native `POST /api/records` flow ([InvenioRDM REST API reference](https://inveniordm.docs.cern.ch/reference/rest_api_drafts_records/)). If you're scripting this once for a single paper deposit, the legacy API below is fine.
 
 ```bash
 # 1. Create a personal access token at https://zenodo.org/account/settings/applications/tokens/new/
@@ -92,6 +96,12 @@ curl -s -X POST -H "Authorization: Bearer $ZENODO_TOKEN" \
 ```
 
 A `metadata.json` template is included as [`zenodo_metadata_template.json`](zenodo_metadata_template.json) — copy, edit, post.
+
+**Two caveats before you use the template:**
+
+1. **It targets the legacy API.** Field names like `upload_type`, `access_right`, and the flat `related_identifiers[].resource_type` reflect the legacy `/api/deposit/depositions` schema. For the InvenioRDM-native `/api/records` flow the field names differ: `resource_type` replaces `upload_type` (with a different controlled vocabulary), and `access` becomes a nested `{record, files}` block instead of the flat `access_right` string. The legacy schema is shown here because the curl recipe above uses the legacy endpoint.
+
+2. **The `communities` entry assumes a `digital-discovery` community ID exists** on Zenodo. **Verify by loading <https://zenodo.org/communities/digital-discovery> before submitting.** If it doesn't resolve, either drop the `communities` block from your metadata or contact the Royal Society of Chemistry's Digital Discovery editorial office for the canonical community identifier. Communities can also be requested in the Zenodo UI as a separate step after publish.
 
 ## 5. Get the DOI; cite in the paper
 
@@ -150,9 +160,9 @@ Before clicking Publish, verify:
 ## 8. Gotchas
 
 - **File-count limits**: Zenodo accepts up to **100 files per deposit** in the web UI; the API has no hard limit but performance degrades past a few hundred. Prefer the single-tarball deposit (one file, plus the sidecar).
-- **Deposit size limit**: 50 GB per record (Zenodo standard quota). Encrypted holotype bundles compressed by zstd are typically well under this; an extreme outlier could request a quota increase from Zenodo support.
+- **Deposit size limit**: 50 GB per record is the default. An additional 150 GB pool is available across all your records, and one-time per-record increases up to 200 GB can be requested from Zenodo support ([quota docs](https://help.zenodo.org/docs/deposit/manage-quota/)). Encrypted holotype bundles compressed by zstd are typically well under the 50 GB default.
 - **Filename normalization**: Zenodo doesn't rename your files but URL-encodes them in download links. Avoid spaces or special characters in the tarball filename.
-- **Embargo end-date editing**: you can shorten an embargo (reveal earlier) but not extend it past the original date without contacting Zenodo support.
+- **Embargo end-date editing**: embargo dates are part of editable metadata; they can be shortened or extended after publish via the standard edit-metadata flow. Best practice when extending: add a note to the description explaining why, so the public record of the change is on the deposit itself rather than only in your inbox.
 - **No deletion of published deposits**: Zenodo deposits are permanent by policy. If you discover that an unintentional credential leaked into a deposited transcript, contact Zenodo's GDPR/legal team — they have a documented process for serious cases but treat it as a last resort.
 - **Encrypted-bundle considerations**: if your holotype archive is encrypted (git-crypt) and the paper bundle was extracted from it, the bundle itself is **plaintext** (paper_bundle.py decompresses + decrypts on extraction). Don't accidentally upload the encrypted `.jsonl.zst` files — that would defeat the verification path. Confirm: `file zenodo-deposit/*/transcript.jsonl` should report ASCII text, not zstd data.
 
@@ -161,7 +171,7 @@ Before clicking Publish, verify:
 - **Update the paper's DAS** with the version DOI.
 - **Save the deposit's reservation link** (Zenodo emails this on publish) to your password manager — it's how you'll edit metadata or mint a new version later.
 - **Add the deposit to your ORCID profile** automatically by linking ORCID under Zenodo's account settings; future deposits then populate your ORCID without manual entry.
-- **Track citations**: Zenodo emits a Crossref Event Data webhook when others cite the DOI; you can see citation counts on the deposit page.
+- **Track citations**: Zenodo populates the deposit page's citation count from DataCite Event Data and Crossref Event Data (a joint Crossref/DataCite service that polls indexed publications for citation links). Counts appear once the citing work is itself indexed in one of those sources — typically days to weeks after the citing paper is published.
 
 ## When NOT to use Zenodo
 
