@@ -28,17 +28,16 @@ LLM-driven sessions that drive instruments, perform autonomous analysis, or exec
 6. **No silent network behavior.** Setup is an interactive conversation about where the archive lives and whether it has a remote. Push to remote is never automatic — always confirmed per-action.
 7. **Verifiable without the skill.** The archive is a plain git repo. A reviewer with no access to the host CLI can verify integrity using stock Unix tools. See [VERIFY.md](#verifying-an-archive-without-the-skill).
 
-## What's in v1.0.0
+## Features
 
-- **Three first-class sources**: Claude Code (with nested subagents), Codex (with date-partitioned rollouts), Google Antigravity (with the encrypted-blob-ignored plaintext side-channel).
-- **Optional zstd compression at deposit** — manifests record both uncompressed and compressed SHA-256 so reviewers can verify with or without `zstd` installed. Locked per archive at init.
-- **Reproducibility-grade manifest (v4)** — captures `project_git_state` (the repo state the LLM operated on, sourced from the session-start header when the host CLI provides one), `wall_clock_seconds`, and aggregated `total_input_tokens` / `total_output_tokens` / `total_cache_*_tokens`.
-- **`paper_bundle.py`** — packages many sessions into one Zenodo-ready deposit with a master `BUNDLE_MANIFEST.json` and optional tarball + SHA-256 sidecar.
-- **Two-track verification** — reviewer with `zstd` installed verifies the uncompressed canonical SHA-256; reviewer without `zstd` verifies the on-disk compressed SHA-256. Both succeed for valid deposits.
-- **Optional GPG-signed deposit commits** — opt-in at init via `--sign-commits` for high-stakes archives.
-- **Auto-push to the configured remote** — default ON when a remote URL is set at init (the privacy decision happens then, with an explicit warning). Pre-publication / IP-sensitive workflows can opt out via `--no-auto-push`. Local-only archives have nothing to push and auto-push is forced off.
-- **Optional encryption-before-push via `git-crypt`** (new in v1.1) — opt in with `init.py --encrypt-transcripts` for remotes you don't fully trust with the raw transcript content. The remote stores only encrypted blobs; manifests stay plaintext (metadata leakage is documented). **Data-loss risk**: lose the GPG key and every encrypted deposit becomes unrecoverable, including any paper-cited session. Init refuses without an explicit `--i-understand-key-loss-means-data-loss` acknowledgment, and drops `HOW_TO_BACK_UP_YOUR_KEY.md` into the archive with backup + recovery-testing instructions.
-- **LLM-adaptable extension** — when invoked from an unrecognized host CLI, the skill instructs the LLM to read `docs/ADDING_A_SOURCE.md` and write a new Source class against the documented contract, rather than silently dropping that CLI's sessions.
+- **Three host CLIs supported out of the box**: Claude Code (with nested subagents), Codex (date-partitioned rollouts), Google Antigravity. New CLIs are one file under `holotype/sources/` against a documented [Source ABC](docs/ADDING_A_SOURCE.md).
+- **Optional `zstd` compression** at deposit, with two-track verification (uncompressed canonical hash + compressed-as-stored hash) so reviewers can verify with or without `zstd` installed.
+- **Optional `git-crypt` encryption** before push, for backup remotes that shouldn't see transcript content. Manifests stay plaintext; the data-loss risk of key loss is surfaced loudly at init.
+- **Optional GPG-signed deposit commits** for tamper-evident provenance.
+- **Reproducibility manifest** capturing project repo git state, wall-clock duration, model IDs, and per-session token totals.
+- **Paper bundles** via `scripts/paper_bundle.py` — extract a curated session subset for Zenodo deposit, with a master `BUNDLE_MANIFEST.json` and tarball + SHA-256 sidecar.
+- **Parallel ingest pipeline** with auto-chunking and per-chunk push so encrypted multi-GB archives don't trip GitHub's pack-size limit.
+- **Background tick** (macOS launchd, Linux systemd unit template) for catch-up ingests on long-running sessions.
 
 ## Architecture
 
@@ -227,11 +226,7 @@ See [docs/ADDING_A_SOURCE.md](docs/ADDING_A_SOURCE.md) for the field guide. The 
 
 ## Status
 
-**Current release: v2.0.1.** Three sources shipped (Claude Code, Codex, Antigravity), manifest v4 with reproducibility fields, optional zstd compression with two-track verify, optional `git-crypt` encryption-before-push, multi-session paper bundles, optional GPG-signed commits, parallel-worker ingest pipeline (v2.0), CI runs the full selftest on Ubuntu + macOS, ~30 end-to-end selftest checks.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full design history across v1.0.0 → v2.0.1.
-
-The project is single-maintainer at present; see [GOVERNANCE.md](GOVERNANCE.md) for how decisions get made and [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute. Sustained public iterative development is the explicit current focus before any JOSS-track or similar peer-reviewed-software submission — see "JOSS readiness" below.
+Active development. See [CHANGELOG.md](CHANGELOG.md) for the version history. Single-maintainer; see [GOVERNANCE.md](GOVERNANCE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## How to cite
 
