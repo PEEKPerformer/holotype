@@ -2,6 +2,8 @@
 
 This document covers the Zenodo-side mechanics of depositing a holotype paper bundle for citation in a peer-reviewed paper. The holotype side of the workflow (generating the bundle) is documented in the [`Tutorial: citing an LLM session in your paper`](../README.md#tutorial-citing-an-llm-session-in-your-paper) section of the project README. This document picks up where that tutorial ends — at the moment you have a `paper_bundle.py`-generated directory or tarball and need to turn it into a DOI you can cite.
 
+> **Caveat — Zenodo is a moving target.** Zenodo runs on InvenioRDM and ships features continuously: UI flows shift, API endpoints get deprecated and superseded, file/size quotas change, community identifiers come and go, license vocabularies evolve. Treat the specific numbers, endpoints, field names, and community IDs in this document as **directionally correct but verifiable** — confirm anything load-bearing for your paper against the current [`zenodo.org/help`](https://zenodo.org/help), [`developers.zenodo.org`](https://developers.zenodo.org/), and the [InvenioRDM REST API reference](https://inveniordm.docs.cern.ch/) before you click Publish. The workflow *shape* (generate bundle → upload → choose access + license → mint DOI → cite in paper → version-on-update) is stable. The mechanics around that shape are not. If you spot a discrepancy against Zenodo's live docs, open an issue on the holotype repo so the next user gets a corrected version.
+
 ## Prerequisites
 
 - **Zenodo account** linked to your **ORCID iD**. Both are free. Linking ORCID at signup time (not after the fact) gives the cleanest author attribution on the published deposit.
