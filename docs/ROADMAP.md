@@ -42,7 +42,7 @@ Our v4 index is ~160 MB on a 3000-session archive. Adding `mmap_size=256MB` give
 
 ### Investigate `git-crypt` long-running filter mode — INVESTIGATED, NOT AVAILABLE
 
-Diagnosed during the v1.1.4 cold-start run: encrypted bulk-initial is dominated by per-file `git-crypt clean` filter forks at `git add` time (~50 ms each × N files = many minutes of pure subprocess startup). Git's process-filter protocol (since git 2.11) lets a filter program stay running across multiple files in one `git add`.
+Identified as the dominant cost in encrypted bulk-initial: per-file `git-crypt clean` filter forks at `git add` time (~50 ms each × N files = many minutes of pure subprocess startup on a multi-thousand-session archive). Git's process-filter protocol (since git 2.11) lets a filter program stay running across multiple files in one `git add`, eliminating the per-file fork cost.
 
 **Status (checked 2026-05-22)**: git-crypt **0.8.0 does NOT implement** the process-filter protocol. Evidence:
 

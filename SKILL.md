@@ -267,16 +267,23 @@ If on Linux or Windows, skip this step and tell the user the equivalent can be s
 ├──────────────────┼────────────┼────────────┼────────────────────────────────────────────────┤
 │ Plain, no sign   │ ~3-5 min   │ ~1-2 min   │ Dominated by SQLite + git plumbing.            │
 │ Plain + sign     │ ~25-35 min │ ~3-5 min   │ Per-session: ~300 ms GPG sig × N commits.      │
-│ Encrypted        │ ~30-40 min │ ~20-30 min │ git-crypt forks per-file at `git add` time.    │
+│ Encrypted        │ ~45-60 min │ ~45-55 min │ git-crypt forks per-file at `git add` time.    │
 │                  │            │            │ Bulk-initial does NOT save the filter cost.    │
-│ Encrypted + sign │ ~50-90 min │ ~20-30 min │ Encryption dominates; signing is one extra sig │
-│                  │            │            │ in bulk-initial mode.                          │
+│ Encrypted + sign │ ~60-90 min │ ~50-70 min │ Encryption dominates; signing is one extra sig │
+│                  │            │            │ in bulk-initial mode. Plus push time — see     │
+│                  │            │            │ below.                                         │
 └──────────────────┴────────────┴────────────┴────────────────────────────────────────────────┘
 ```
 
-> Numbers above are for ~6000-session archives on an M-series Mac. Scale linearly with session count. Subsequent (steady-state) ingests are fast in all configurations — only new sessions get processed.
+> Numbers above are calibrated for ~6000-session / ~8 GB-source archives on Apple Silicon (M-series). Scale roughly linearly with session count. Subsequent (steady-state) ingests are fast in all configurations — only new sessions get processed.
 >
-> *Why encrypted bulk-initial isn't faster*: git-crypt invokes one fork+exec of its clean filter per file at `git add` time. The bulk-initial combined commit doesn't avoid this per-file filter cost — it only avoids the per-commit GPG signing cost. A future v1.2 may use git's process-filter protocol to make encrypted bulk-initial much faster; for now, plan for the table above.
+> **Push time scales with encrypted-pack size, not session count.** Encrypted bulk-initial of a 6000-session archive produces a ~2 GiB pack. Over a typical home upstream (~50 Mbps) that's ~5-7 min push time. **CRITICAL — GitHub rejects packs larger than 2.00 GiB on a single push** (undocumented limit; the error surfaces as HTTP 500 over HTTPS or "fatal: pack exceeds maximum allowed size" over SSH). If your encrypted bulk-initial commit would produce a pack near or above that, the FIRST push will fail.
+>
+> *Recovery if the first push hits the 2 GiB limit*: run `python scripts/repush_chunked.py` — it soft-resets the bulk-initial commit, bin-packs the session directories into ~1.5 GiB chunks (each as its own signed commit), and pushes each sequentially. The hash chain is unaffected — holotype's chain is per-session SHA-256, not per-commit. Future v1.2 ingests will detect oversized packs and chunk automatically.
+>
+> *Why encrypted bulk-initial isn't faster than per-session*: git-crypt invokes one fork+exec of its clean filter per file at `git add` time. The bulk-initial combined commit doesn't avoid this per-file filter cost — it only avoids the per-commit GPG signing cost. (We verified git-crypt 0.8.0 does NOT support git's long-running process-filter protocol, see `docs/ROADMAP.md`.)
+>
+> **Use SSH transport for encrypted setups.** HTTPS gives cryptic HTTP 500 errors when GitHub rejects an oversized pack; SSH surfaces the actual `pack exceeds maximum allowed size` message that tells you to chunk. If the wizard configured a `https://` remote, switch via `git -C <archive> remote set-url origin git@github.com:USER/REPO.git`.
 
 Then offer the user a choice about commit topology for THIS first ingest:
 
@@ -413,6 +420,8 @@ Read these before any operation:
 | Print the manifest for one session | `python scripts/cite.py <session-id> --manifest-only` |
 | Produce a full citable bundle for one session | `python scripts/cite.py <session-id>` |
 | Bundle many sessions for a paper's Zenodo deposit | `python scripts/paper_bundle.py --sessions a,b,c --out <dir> [--tarball]` |
+| Recover when first push fails with "pack exceeds 2 GiB" | `python scripts/repush_chunked.py` |
+| Pause / resume the macOS background tick (for repo surgery) | `python scripts/install-launchd.py --pause` then `--resume` |
 | Verify the archive's hash chain | `python scripts/verify.py` |
 | Verify a single session | `python scripts/verify.py <session-id>` |
 | Drop and rebuild the SQLite index from the canonical archive | `python scripts/reindex.py` |

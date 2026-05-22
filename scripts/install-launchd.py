@@ -158,18 +158,81 @@ def uninstall() -> int:
     return 0
 
 
+def pause() -> int:
+    """Unload the agent without deleting the plist.
+
+    Use case: about to do repo surgery (chunked re-push, manual git
+    rebase) and don't want the tick firing mid-operation. ``--resume``
+    re-loads from the same plist.
+    """
+    require_macos()
+    if not PLIST_PATH.exists():
+        print("no holotype launchd agent installed (nothing to pause)")
+        return 0
+    out = subprocess.run(
+        ["launchctl", "list"], capture_output=True, text=True
+    )
+    if LABEL not in out.stdout:
+        print(f"holotype launchd agent {LABEL} is already not loaded")
+        return 0
+    unload = subprocess.run(
+        ["launchctl", "unload", str(PLIST_PATH)],
+        capture_output=True, text=True,
+    )
+    if unload.returncode != 0:
+        sys.stderr.write(f"launchctl unload failed: {unload.stderr}")
+        return 1
+    print(f"paused {LABEL} (plist preserved at {PLIST_PATH}; resume with --resume)")
+    return 0
+
+
+def resume() -> int:
+    """Re-load the agent from the preserved plist."""
+    require_macos()
+    if not PLIST_PATH.exists():
+        sys.stderr.write(
+            f"no holotype launchd agent installed at {PLIST_PATH} — run with "
+            f"--archive <p> to install fresh.\n"
+        )
+        return 1
+    out = subprocess.run(
+        ["launchctl", "list"], capture_output=True, text=True
+    )
+    if LABEL in out.stdout:
+        print(f"holotype launchd agent {LABEL} is already loaded")
+        return 0
+    load = subprocess.run(
+        ["launchctl", "load", str(PLIST_PATH)],
+        capture_output=True, text=True,
+    )
+    if load.returncode != 0:
+        sys.stderr.write(f"launchctl load failed: {load.stderr}")
+        return 1
+    print(f"resumed {LABEL}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--archive", type=Path, default=None,
-                   help="Archive path (required unless --uninstall).")
+                   help="Archive path (required unless --uninstall / --pause / --resume).")
     p.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_SECONDS,
                    help="Seconds between runs (default 1800 = 30 min).")
-    p.add_argument("--uninstall", action="store_true",
-                   help="Remove the agent instead of installing.")
+    op = p.add_mutually_exclusive_group()
+    op.add_argument("--uninstall", action="store_true",
+                    help="Remove the agent (deletes the plist).")
+    op.add_argument("--pause", action="store_true",
+                    help="Unload the agent but keep the plist (resumable via --resume).")
+    op.add_argument("--resume", action="store_true",
+                    help="Re-load a paused agent from its preserved plist.")
     args = p.parse_args(argv)
 
     if args.uninstall:
         return uninstall()
+    if args.pause:
+        return pause()
+    if args.resume:
+        return resume()
 
     if not args.archive:
         # Fall back to pointer file

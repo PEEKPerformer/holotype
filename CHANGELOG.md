@@ -2,11 +2,35 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] — 2026-05-22
+
+Recovery tooling for first-push failures against GitHub when encrypted bulk-initial commits exceed GitHub's per-push pack-size limit. Encrypted blobs don't benefit from git's pack-zlib delta compression (encrypted bytes are high-entropy), so the wire pack ≈ the sum of the encrypted file sizes. For archives in the 2 GiB+ range this means the first push hits an undocumented server-side rejection.
+
+### Added
+
+- **`scripts/repush_chunked.py`** — automated recovery when the first push hits GitHub's 2.00 GiB pack-size limit. Refuses to run unless `HEAD` is a `bulk-initial:` commit (conservative — won't touch anything else). Soft-resets that commit, bin-packs `sessions/<project-dir>/` subtrees into N chunks of configurable target size (default 1.5 GiB, well under GitHub's 2 GiB ceiling), creates one signed commit per chunk with deterministic message `bulk-initial part K/N: chunked for github 2 GiB pack limit`, and pushes each sequentially. Pauses the launchd background tick during surgery so a scheduled ingest can't race the soft-reset. `--dry-run` shows the bin-pack plan without touching anything; `--no-push` creates the chunks but leaves the push to the user.
+
+- **`scripts/install-launchd.py --pause` and `--resume`** — toggle the macOS background tick without uninstalling. `--pause` runs `launchctl unload` but keeps the plist on disk; `--resume` re-loads from the preserved plist. Used by `repush_chunked.py` and any other repo-surgery operation that needs to keep the tick out of the way.
+
+### Changed
+
+- **Wizard Step 9a ETA matrix recalibrated** against measured run data on a ~6000-session / ~8 GB archive (Apple Silicon M-series). Previous v1.1.5 numbers underestimated the encrypted configurations; observed times were ~50 min for encrypted-signed-bulk-initial (vs. the prior "~20-30 min" estimate). Updated:
+  - Encrypted: ~45-60 min (per-session or bulk-initial)
+  - Encrypted + sign: ~60-90 min per-session, ~50-70 min bulk-initial
+
+- **Wizard Step 9a now warns about GitHub's 2.00 GiB single-push pack-size limit** and recommends SSH transport over HTTPS for encrypted setups. HTTPS surfaces the rejection as a cryptic HTTP 500; SSH gives the real `pack exceeds maximum allowed size` message that points to the resolution path. Links to `scripts/repush_chunked.py` for recovery.
+
+### Investigated, confirmed
+
+- **GitHub HTTPS sideband + 2 GiB pack rejection** is server-enforced and undocumented in the public GitHub docs, but reproducible. Not fixable from the client side. Chunked re-push is the recovery path; switching to a self-hosted remote (Gitea, Forgejo, GitLab CE) avoids the limit entirely.
+
+---
+
 ## [1.1.5] — 2026-05-22
 
 ### Changed
 
-- **Wizard Step 9a — first-ingest ETA matrix replaces the old "minutes" estimate.** The previous copy was written before encryption was added and didn't account for git-crypt's per-file clean-filter forks at `git add` time. New ETA table is conservative and honest about the four common configurations (plain vs. encrypted, signed vs. unsigned, per-session vs. bulk-initial). Encrypted bulk-initial is now correctly framed as ~20-30 min for ~6000 sessions on M-series, not "a few minutes." Includes a short note on *why* encrypted bulk-initial doesn't save the encryption cost (filter forks happen at `git add`, regardless of how many commits the cycle produces).
+- **Wizard Step 9a — first-ingest ETA matrix replaces the old "minutes" estimate.** Earlier copy was written before encryption-before-push was added and didn't account for git-crypt's per-file clean-filter forks at `git add` time. New ETA table is honest about the four common configurations (plain vs. encrypted × signed vs. unsigned × per-session vs. bulk-initial). Includes a short note on *why* encrypted bulk-initial doesn't save the encryption cost (filter forks happen at `git add`, regardless of how many commits the cycle produces).
 
 ### Added
 
@@ -14,7 +38,7 @@ All notable changes to `holotype`. Format adapted from [Keep a Changelog](https:
 
 ### Investigated, filed as not-available
 
-- **git-crypt process-filter mode.** Diagnosed during the cold-start run as the dominant cost in encrypted bulk-initial. **Confirmed git-crypt 0.8.0 does not implement git's long-running process-filter protocol** — verified via `git-crypt process` (rejected) and `strings $(which git-crypt)` (no protocol packet-line strings). Options recorded in ROADMAP: upstream PR vs. live with it. Decision: lean on the v2 parallel-workers design instead.
+- **git-crypt process-filter mode.** Identified as the theoretical fix for the dominant cost in encrypted bulk-initial (per-file `git-crypt clean` filter forks at `git add` time). **Confirmed git-crypt 0.8.0 does not implement git's long-running process-filter protocol** — verified via `git-crypt process` (rejected as not-a-command) and binary `strings` inspection (no protocol packet-line markers). Options recorded in ROADMAP: upstream PR vs. live-with-it. Decision: lean on the v2 parallel-workers design instead.
 
 ---
 
@@ -40,7 +64,7 @@ All notable changes to `holotype`. Format adapted from [Keep a Changelog](https:
 
   The step detects candidate destinations on the user's machine — iCloud Drive root, Dropbox, Google Drive, OneDrive, 1Password CLI (`op` binary), `~/Documents/` *only if* iCloud "Desktop & Documents" sync is detected — and offers them in priority order with a custom-path escape hatch. Recognized cloud-synced destinations are confirmed as "genuinely offsite"; same-disk paths are surfaced as "this is NOT a real backup" without ambiguity.
 
-  Driven by the second cold-start end-to-end run: the previous wizard improvised this step ad-hoc and shipped the user a same-disk export with a "now you move it" instruction. The improvised step also got the `git-crypt` invocation wrong on first attempt (`git -C ... git-crypt export-key` — git-crypt is a top-level command). Pinning the step + the correct syntax + the cloud-sync detection so future wizard runs don't improvise.
+  Pinning this as a numbered wizard step (instead of leaving it for the host LLM to improvise mid-flow) ensures the correct `git-crypt export-key` syntax is used and that the destination is verified as genuinely offsite — not just on the same physical disk under a different folder name.
 
 ---
 
@@ -63,7 +87,7 @@ The class of user who would have been bitten by a default-flip (data-loss-by-def
 
 ## [1.1.1] — 2026-05-22
 
-Wizard polish + first-time-backfill perf, driven by feedback from the first cold-start end-to-end run in a fresh Claude Code session.
+Wizard polish + first-time-backfill perf.
 
 ### Added
 
@@ -74,7 +98,7 @@ Wizard polish + first-time-backfill perf, driven by feedback from the first cold
 
 ### Changed
 
-- **SKILL.md wizard Step 8 — launchd tick clarification.** Previously said "local-only and never pushes to a remote," which contradicted the v1.0 auto-push reality. Now correctly: push behavior follows the configured `auto_push` setting; the tick deposits AND pushes when auto-push is on. Removes a real ambiguity that the first cold-start run surfaced (the wizard text self-corrected mid-sentence).
+- **SKILL.md wizard Step 8 — launchd tick clarification.** Previously said "local-only and never pushes to a remote," which contradicted the v1.0 auto-push reality. Now correctly: push behavior follows the configured `auto_push` setting; the tick deposits AND pushes when auto-push is on. That's the whole point for "set it and forget it" users.
 - **SKILL.md wizard Step 9 split into 9a (scale warning) and 9b (run ingest)**, so the user has a chance to pick `--bulk-initial` before kicking off a long-running command.
 
 ---
@@ -162,7 +186,7 @@ First public release. The substrate that makes Digital Discovery's LLM-DAS requi
 
 - **No filtering of transcript content, ever.** `claude-vault` and similar tools strip tool calls as "noise." holotype exists because that tradeoff is wrong for scientific reproducibility. The tool calls *are* the experimental record.
 - **No silent network behavior.** Setup is an explicit conversation about remote URL choice. Push to remote is never automatic — every push is per-action user-confirmed.
-- **No auto-invocation.** Depositing data into a scientific archive is a deliberate user decision, not an opportunistic background task. Brenden's `Stop`-hook rsync to `~/Documents/Claude-Backups/` is the "everything, automatically" layer; holotype is the curated layer on top.
+- **No auto-invocation.** Depositing data into a scientific archive is a deliberate user decision, not an opportunistic background task. A separate full-mirror layer (e.g. an rsync `Stop` hook to `~/Documents/Claude-Backups/`) can handle "everything, automatically" if you want it; holotype is the curated layer on top.
 - **Verify with stock Unix tools.** The `VERIFY.md` shipped inside every archive (and inside every `paper_bundle.py` deposit) uses only `shasum`, `jq`, `git`, and optionally `zstd`. A reviewer five years from now needs no holotype install.
 
 ### Known limitations
