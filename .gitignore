@@ -45,3 +45,10 @@ htmlcov/
 # Local Claude Code per-project overrides (already gitignored
 # convention, but be explicit here too).
 /.claude/settings.local.json
+
+# Stray Antigravity CLI project pointer (auto-created when the user
+# opens this dir in Antigravity — symlinks into ~/.gemini/).
+/.antigravitycli/
+
+# Editable-install metadata
+*.egg-info/

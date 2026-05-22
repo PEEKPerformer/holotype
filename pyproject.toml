@@ -52,21 +52,11 @@ Homepage = "https://github.com/PEEKPerformer/holotype"
 Issues = "https://github.com/PEEKPerformer/holotype/issues"
 Changelog = "https://github.com/PEEKPerformer/holotype/blob/main/CHANGELOG.md"
 
-[project.scripts]
-# Console-script entry points for the install-as-a-CLI workflow.
-# The skill is the primary entry point (invoked via /holotype in
-# Claude Code etc.) — these scripts are the underlying mechanics
-# exposed for direct use, scripting, and CI.
-holotype-init = "scripts.init:main"
-holotype-ingest = "scripts.ingest:main"
-holotype-verify = "scripts.verify:main"
-holotype-search = "scripts.search:main"
-holotype-cite = "scripts.cite:main"
-holotype-context = "scripts.context:main"
-holotype-reindex = "scripts.reindex:main"
-holotype-usage = "scripts.usage_estimate:main"
-holotype-paper-bundle = "scripts.paper_bundle:main"
-holotype-selftest = "scripts.selftest:main"
+# Scripts are invoked as `python scripts/<name>.py ...` (the form used
+# throughout the skill and the launchd plist). They are not exposed as
+# pip console_scripts because some filenames contain hyphens
+# (`configure-host-retention.py`) which can't be imported as Python
+# modules anyway. The skill is the user-facing entry point.
 
 [tool.setuptools]
 # Ship both the library package and the scripts directory so the
