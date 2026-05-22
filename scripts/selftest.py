@@ -637,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
         # auto-push + tiny --max-pack-gib forces multiple chunks; the
         # remote should receive ALL of them.
         cp_bare = tmp / "bare-chunked-push.git"
-        subprocess.run(["git", "init", "--bare", str(cp_bare)], check=True, capture_output=True)
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(cp_bare)], check=True, capture_output=True)
         cp_archive = tmp / "archive-chunked-push"
         result = run_script(
             REPO_ROOT / "scripts" / "init.py",
@@ -787,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Refuse without the explicit data-loss ack.
         bare2 = tmp / "bare-encrypt-test.git"
-        subprocess.run(["git", "init", "--bare", str(bare2)], check=True, capture_output=True)
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare2)], check=True, capture_output=True)
         if shutil.which("git-crypt"):
             result = run_script(
                 REPO_ROOT / "scripts" / "init.py",
@@ -832,7 +832,7 @@ def main(argv: list[str] | None = None) -> int:
 
         step("auto-push: init with a local bare-repo remote and confirm ingest pushes")
         bare_remote = tmp / "bare-remote.git"
-        subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True,
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare_remote)], check=True,
                        capture_output=True)
         ap_archive = tmp / "archive-autopush"
         result = run_script(
