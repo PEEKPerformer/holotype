@@ -236,10 +236,6 @@ The repository's [`CITATION.cff`](CITATION.cff) provides machine-readable metada
 
 The canonical software DOI is minted by Zenodo via the GitHub-Zenodo integration on each tagged release. Cite the **version DOI** for the specific release your work depended on, not the concept DOI (which tracks the latest version). See [docs/PUBLISHING_TO_ZENODO.md](docs/PUBLISHING_TO_ZENODO.md) for the parallel guidance on citing individual deposited sessions from a paper's Data Availability Statement.
 
-## JOSS readiness
-
-Targeting [JOSS](https://joss.theoj.org/) submission eventually. Repo-level standards (LICENSE, CHANGELOG, CITATION.cff, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, GOVERNANCE, templates, CI, tests) are in place as of v2.0.2. JOSS also requires 6+ months of public iterative development and demonstrated external research use — both met by continued open development, not by a single submission push. If you use `holotype` in published work, opening an issue is the most useful signal.
-
 ## AI assistance disclosure
 
 `holotype` was developed with substantial AI assistance from Anthropic Claude (Opus 4.x via [Claude Code](https://claude.com/claude-code)) for code, tests, and documentation. The human author framed the problem, made the architectural decisions, reviewed and tested all output, and is responsible for the result. The selftest harness is the gate.
