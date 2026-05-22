@@ -97,6 +97,24 @@ def materialize_codex_source(tmp: Path) -> Path:
     return src
 
 
+def materialize_antigravity_source(tmp: Path) -> tuple[Path, str]:
+    """Build a fake `~/.gemini/antigravity-cli/brain/`-shaped source dir.
+
+    Returns (source_root, session_uuid) so callers can assert against the
+    UUID without re-deriving it.
+    """
+    import os, time
+    src = tmp / "antigravity-source"
+    uuid = "cccc1111-2222-3333-4444-555566667777"
+    log_dir = src / uuid / ".system_generated" / "logs"
+    log_dir.mkdir(parents=True)
+    out = log_dir / "transcript_full.jsonl"
+    shutil.copy(FIXTURES / "synthetic-antigravity-conversation.jsonl", out)
+    older = time.time() - 60
+    os.utime(out, (older, older))
+    return src, uuid
+
+
 def run_script(script: Path, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     import os
     env = os.environ.copy()
@@ -424,6 +442,46 @@ def main(argv: list[str] | None = None) -> int:
         step("verify.py still clean with mixed claude-code + codex sessions")
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, f"mixed-source verify failed: {result.stderr}")
+
+        step("Antigravity source ingests a brain/<uuid>/.../transcript_full.jsonl")
+        ag_src, ag_uuid = materialize_antigravity_source(tmp)
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(archive),
+            "--source", str(ag_src),
+            "--source-name", "antigravity",
+        )
+        if args.verbose:
+            print(result.stdout)
+            print(result.stderr, file=sys.stderr)
+        expect(result.returncode == 0, f"antigravity ingest returncode={result.returncode}: {result.stderr}")
+        expect("new=1" in result.stdout, f"expected new=1 from antigravity ingest:\n{result.stdout}")
+
+        ag_deposits = list((archive / "sessions" / "antigravity").rglob("transcript.jsonl"))
+        expect(len(ag_deposits) == 1, f"expected 1 antigravity deposit, got {len(ag_deposits)}")
+        ag_manifest = json.loads(ag_deposits[0].with_name("manifest.json").read_text())
+        expect(ag_manifest["source"] == "antigravity",
+               f"antigravity manifest source wrong: {ag_manifest.get('source')}")
+        expect(ag_manifest["session_id"] == ag_uuid,
+               f"antigravity session_id wrong: {ag_manifest.get('session_id')} (expected {ag_uuid})")
+        expect(ag_manifest["has_tool_use"] is True, "antigravity tool_calls not detected")
+        expect("Gemini 3.5 Flash (High)" in ag_manifest["models"],
+               f"antigravity model extraction failed: {ag_manifest.get('models')}")
+        expect(ag_manifest["message_count"] >= 4,
+               f"antigravity message_count too low: {ag_manifest.get('message_count')}")
+
+        step("Antigravity FTS hits work (tool-call content + planner response)")
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "equilibration",
+            "--archive", str(archive), "--json",
+        )
+        parsed = json.loads(result.stdout)
+        expect(any(h["session_id"] == ag_uuid for h in parsed),
+               f"FTS query for antigravity content 'equilibration' didn't hit the antigravity session")
+
+        step("Antigravity deposit verifies clean alongside other sources")
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect(result.returncode == 0, f"three-source verify failed: {result.stderr}")
 
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at

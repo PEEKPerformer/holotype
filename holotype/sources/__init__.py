@@ -8,6 +8,7 @@ The Source ABC is the seam — adding a new agent CLI means adding one
 file in this package, not touching ingest.py.
 """
 
+from holotype.sources.antigravity import AntigravitySource
 from holotype.sources.base import Source, DepositCandidate, MessageInfo
 from holotype.sources.claude_code import ClaudeCodeSource
 from holotype.sources.codex import CodexSource
@@ -17,6 +18,7 @@ from holotype.sources.codex import CodexSource
 ALL_SOURCES: list[type[Source]] = [
     ClaudeCodeSource,
     CodexSource,
+    AntigravitySource,
 ]
 
 
@@ -33,6 +35,7 @@ __all__ = [
     "MessageInfo",
     "ClaudeCodeSource",
     "CodexSource",
+    "AntigravitySource",
     "ALL_SOURCES",
     "source_by_name",
 ]
