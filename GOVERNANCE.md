@@ -45,27 +45,8 @@ This will change if and when the project grows a multi-maintainer team (see "Suc
 
 Every release ships with a `CHANGELOG.md` entry, a git tag with annotated message, and a GitHub Release page using the tag annotation as the body. As of v2.0.2 onward, releases are mirrored to Zenodo via the GitHub-Zenodo integration, minting a software DOI per version.
 
-## Conflict of interest policy
+## Conflict of interest
 
-The current maintainer:
+The current maintainer is affiliated with the Adamson Lab at the University of Connecticut, which is the original use case driving `holotype`'s design. No financial relationship with Anthropic, OpenAI, or Google.
 
-- Is affiliated with the Adamson Lab at the University of Connecticut, which is the original use case driving `holotype`'s design.
-- Has no financial relationship with Anthropic (the maker of Claude Code, one of `holotype`'s supported sources), OpenAI (Codex), or Google (Antigravity).
-- Plans to cite `holotype` in his own scientific publications. The tool was developed to support that workflow, but the design is general (any LLM-driven research workflow that needs a forensic-grade transcript archive).
-
-External contributors should disclose any potential COI in PR descriptions if relevant — e.g., "I work on $VENDOR's agent CLI and this PR adds a Source for it." This isn't disqualifying; it just helps maintainers and reviewers evaluate the change.
-
-## Succession and growth
-
-If the project grows to the point where solo maintenance is a bottleneck or single-point-of-failure risk, the maintainer will document a transition plan:
-
-- Adding co-maintainers from sustained contributors
-- Adopting a more formal RFC process for architectural decisions
-- Defining a deprecation policy for archive-format changes that affects existing users
-- Publishing a maintainer-emeritus process for handing off long-term
-
-These changes will be made via a documented governance amendment (PR to this file, discussed in an issue, merged after community feedback). Until then, the model is "solo maintainer with strong opinions, listen to contributors, fork if needed."
-
-## Acknowledgements
-
-`holotype`'s development has been substantially AI-assisted (see the AI assistance disclosure in `README.md`). Contributors should feel free to use AI tools in their own work on the project — see `CONTRIBUTING.md` for the standard expectations. The maintainer remains responsible for what merges, regardless of how it was originally drafted.
+External contributors should disclose any potential COI in PR descriptions if relevant (e.g., "I work on $VENDOR's agent CLI and this PR adds a Source for it"). Not disqualifying; just useful context.

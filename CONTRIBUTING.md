@@ -117,10 +117,6 @@ Use the GitHub Issues tab with the "feature request" template. Before opening, c
 
 For security issues — credential leakage, hash-chain bypass, key-recovery attacks against the git-crypt deposit format — don't open a public issue. See [SECURITY.md](SECURITY.md) for the disclosure process.
 
-## A note on AI-assisted contributions
-
-`holotype` itself was built with substantial AI assistance (see the AI assistance disclosure in `README.md`). Contributions that use AI tools (Claude Code, Copilot, Cursor, etc.) are fine and don't need to be flagged — but the standard JOSS expectation applies: the human contributor is responsible for the correctness, originality, and licensing of the submitted code, and must have reviewed and tested all AI-assisted output. The selftest is the line: if it passes and the change is sensible on inspection, the source of the original draft doesn't matter.
-
 ## Code of Conduct
 
 By contributing, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md). The short version: be respectful, focus on the work, assume good faith.

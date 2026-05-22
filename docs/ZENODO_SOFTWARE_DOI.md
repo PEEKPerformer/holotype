@@ -28,7 +28,7 @@ Zenodo's GitHub integration only fires for **new releases created after the togg
 - **Option A — accept the gap and start fresh from the next release.** The current v2.0.1 release stays on GitHub but doesn't get a Zenodo DOI. The next release (e.g., `v2.0.2` or any future release) is the first one with a DOI. This is the cleaner path for most projects.
 - **Option B — delete + recreate the v2.0.1 release on GitHub.** This makes Zenodo see it as new. Costs a few seconds; risks losing the release's view count (negligible at submission time).
 
-For `holotype`: **Option A is recommended.** The JOSS-readiness work landing in v2.0.2 is a natural place to mark the first DOI-minted release.
+For `holotype`: **Option A is recommended** — accept the gap, start fresh from the next release.
 
 ## Cutting a release that mints a DOI
 
@@ -78,10 +78,3 @@ Recovery:
 
 Zenodo's GitHub integration is reliable enough in practice that recovery rarely needs more than a wait or a toggle.
 
-## Cite the Zenodo DOI in JOSS-track papers
-
-For a future JOSS submission about `holotype`, the paper's "Software citation" or equivalent section would reference:
-
-> Ferland, B. (2026). holotype: forensic-grade archival of LLM-driven agent CLI sessions for scientific reproducibility (Version X.Y.Z) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.NNNNNNN
-
-The exact format depends on the journal's style; the BibTeX equivalent can be exported from Zenodo's deposit page.
