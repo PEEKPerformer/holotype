@@ -96,7 +96,7 @@ Python 3.11+ (uses PEP 604 union syntax).
 ### Platform support
 
 - **macOS** — fully supported, including the launchd background tick (`scripts/install-launchd.py`).
-- **Linux** — fully supported. The background tick equivalent is a user systemd unit (left to the user; example in `docs/`).
+- **Linux** — fully supported. The background tick equivalent is a user systemd unit; see [docs/LINUX_SYSTEMD.md](docs/LINUX_SYSTEMD.md) for a template.
 - **Windows** — the core skill works (WSL or native Python); the background tick equivalent is Task Scheduler (left to the user).
 
 ## Usage
