@@ -546,6 +546,49 @@ def main(argv: list[str] | None = None) -> int:
         expect("schema v4" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
 
+        step("--bulk-initial bundles all new deposits into ONE combined commit")
+        # Fresh archive + fresh source → ingest with --bulk-initial.
+        # Expect: exactly one "bulk-initial:" commit covers all the
+        # synthetic sessions, not N "deposit:" commits.
+        bi_archive = tmp / "archive-bulk-initial"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(bi_archive),
+            "--remote-url", "",
+            "--remote-kind", "none",
+            "--compression", "none",
+        )
+        expect(result.returncode == 0, f"bulk-initial init failed: {result.stderr}")
+        bi_source = materialize_source(tmp / "bi-source-parent")
+        before_log = subprocess.run(
+            ["git", "-C", str(bi_archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        before_count = len(before_log.strip().split("\n"))
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(bi_archive),
+            "--source", str(bi_source),
+            "--bulk-initial",
+        )
+        expect(result.returncode == 0, f"bulk-initial ingest failed: {result.stderr}\n{result.stdout}")
+        expect("new=3" in result.stdout,
+               f"expected new=3 deposits in bulk-initial: {result.stdout}")
+        after_log = subprocess.run(
+            ["git", "-C", str(bi_archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        new_commits = after_log.strip().split("\n")[: len(after_log.strip().split("\n")) - before_count]
+        expect(len(new_commits) == 1,
+               f"--bulk-initial should produce exactly 1 commit, got {len(new_commits)}:\n{chr(10).join(new_commits)}")
+        expect("bulk-initial:" in new_commits[0],
+               f"expected `bulk-initial:` prefix on combined commit: {new_commits[0]}")
+        # And: all three sessions should be present in the archive AND
+        # in the SQLite index.
+        bi_deposits = list((bi_archive / "sessions").rglob("transcript.jsonl"))
+        expect(len(bi_deposits) == 3,
+               f"expected 3 deposits in bulk-initial archive, got {len(bi_deposits)}")
+
         step("encrypt-transcripts: refusal paths gate correctly")
         # Refuse without --remote-url.
         result = run_script(

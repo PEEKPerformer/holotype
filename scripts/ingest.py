@@ -331,6 +331,51 @@ def commit_deposit(
     return git_head_short(archive)
 
 
+def commit_bulk_initial(
+    archive: Path,
+    candidates: list[DepositCandidate],
+    sign_commits: bool = False,
+) -> str | None:
+    """One combined commit for the first-time backfill of an archive.
+
+    The user opted into ``--bulk-initial`` at first ingest. Instead of
+    one ``deposit:`` commit per session — which signs N times and is
+    the dominant first-time cost when ``sign_commits`` is on — we
+    bundle every new deposit into a single ``bulk-initial`` commit.
+
+    Loses per-session ordering INSIDE the initial backfill (all
+    bundled sessions share one commit, so you can't see "A deposited
+    before B" within the initial batch). Future per-session ingests
+    are unaffected — they continue to emit one commit each via
+    ``commit_deposit``.
+    """
+    if not candidates:
+        return None
+    rels = [f"sessions/{c.archive_subpath}" for c in candidates]
+    CHUNK = 500
+    for i in range(0, len(rels), CHUNK):
+        run_git(archive, "add", *rels[i:i + CHUNK])
+    diff = run_git(archive, "diff", "--cached", "--quiet")
+    if diff.returncode == 0:
+        return None
+    sources = sorted({c.source_name for c in candidates})
+    src_tag = "+".join(sources) if sources else "?"
+    msg = (
+        f"bulk-initial: {len(candidates)} session(s) ingested [{src_tag}]\n\n"
+        f"First-time backfill of historical sessions. Per-session "
+        f"granular commits resume on subsequent ingests; this commit "
+        f"represents the initial seeding of the archive."
+    )
+    commit_args = ["commit", "-m", msg]
+    if sign_commits:
+        commit_args.insert(1, "-S")
+    out = run_git(archive, *commit_args)
+    if out.returncode != 0:
+        sys.stderr.write(out.stderr)
+        return None
+    return git_head_short(archive)
+
+
 def commit_manifest_migration(
     archive: Path,
     candidates: list[DepositCandidate],
@@ -461,6 +506,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="When --source is given, which Source's parser to use.")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--bulk-initial",
+        action="store_true",
+        help=(
+            "First-time-only mode: bundle ALL transcript-changed deposits "
+            "into a single `bulk-initial:` commit instead of one commit "
+            "per session. Dramatically faster when GPG signing is on "
+            "(one signature vs. N). Loses per-session ordering inside "
+            "the initial backfill; future per-session ingests are "
+            "unaffected. Should only be passed once, on the first ingest "
+            "of a new archive."
+        ),
+    )
     args = p.parse_args(argv)
 
     archive = find_archive(args.archive)
@@ -499,12 +557,16 @@ def main(argv: list[str] | None = None) -> int:
         INDEX_COMMIT_BATCH = 50
         pending_since_commit = 0
 
-        # Two buckets: real content changes get one git commit each
-        # (granular per-session history). Manifest-only refreshes get
-        # bundled into one combined commit at the end of the cycle —
-        # they share a single logical event ("schema bump") and N
-        # separate commits would be a lie about what changed.
+        # Three buckets:
+        # - migrations[]: manifest-only refreshes (transcript bytes
+        #   unchanged) → one combined `migrate:` commit at end of cycle.
+        # - bulk_initial[]: present only when --bulk-initial is passed.
+        #   Genuine content changes go here too instead of per-session
+        #   commits, so the first-time backfill signs/commits once.
+        # - per-session committed: when --bulk-initial is OFF, genuine
+        #   content changes get one commit each via commit_deposit().
         migrations: list[tuple[type[Source], DepositCandidate]] = []
+        bulk_initial: list[tuple[type[Source], DepositCandidate]] = []
 
         with open_index(index_path) as conn:
             for source_cls, candidate in candidates:
@@ -521,13 +583,22 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 if transcript_changed:
-                    # Genuine deposit or content update — per-session commit.
-                    commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
-                    update_index(
-                        conn, archive, source_cls, candidate, commit,
-                        transcript_changed=True,
-                    )
-                    committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
+                    if args.bulk_initial:
+                        # Defer the git commit; just write index rows
+                        # now (cheap — FTS gets the new content).
+                        update_index(
+                            conn, archive, source_cls, candidate, git_commit=None,
+                            transcript_changed=True,
+                        )
+                        bulk_initial.append((source_cls, candidate))
+                    else:
+                        # Genuine deposit or content update — per-session commit.
+                        commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
+                        update_index(
+                            conn, archive, source_cls, candidate, commit,
+                            transcript_changed=True,
+                        )
+                        committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
                 else:
                     # Manifest-only refresh — defer the git commit; do the
                     # index work now (cheap because we skip FTS rebuild).
@@ -545,6 +616,24 @@ def main(argv: list[str] | None = None) -> int:
             # Final batch flush.
             if pending_since_commit:
                 conn.commit()
+
+        # One combined commit for all bulk-initial deposits (when the
+        # user passed --bulk-initial for first-time backfill). Runs
+        # before the migration commit so the bulk-initial appears first
+        # in `git log` — chronological order for the user.
+        if bulk_initial:
+            bi_candidates = [c for _, c in bulk_initial]
+            bi_commit = commit_bulk_initial(archive, bi_candidates, sign_commits=sign_commits)
+            if bi_commit:
+                committed.append(
+                    f"  bulk-initial  {len(bi_candidates)} session(s) ingested"
+                )
+                with open_index(index_path) as conn2:
+                    conn2.executemany(
+                        "UPDATE sessions SET git_commit = ? WHERE session_id = ?",
+                        [(bi_commit, c.session_id) for _, c in bulk_initial],
+                    )
+                    conn2.commit()
 
         # One combined commit for all manifest-only refreshes. Runs OUTSIDE
         # the SQLite `with` block so the index is fully committed first —

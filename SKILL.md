@@ -89,10 +89,77 @@ If the user says no (or this step is skipped because no remote was chosen): proc
 
 Default is yes. The privacy warning was already shown at Step 3; this step is about *when* the user wants the push to happen, not *whether* the remote can see the data.
 
-**Step 5 — Confirm before writing.** Show a summary:
-> "I'll create the archive at `<path>` as a new git repo. Compression: `<auto|none|zstd>` (resolves to `<zstd|none>` on this system). GPG-signed commits: `<yes|no>`. Encrypt transcripts at push: `<yes|no>`. Remote: `<url-or-none>`. Auto-push: `<yes|no>`. Proceed?"
+**Step 4c — GPG-signed deposit commits.** Recommended for any archive destined for a paper's Zenodo deposit — signing adds a tamper-evident layer that survives cloning. Ask:
 
-For high-stakes archives (anything destined for a paper's Zenodo deposit), additionally offer GPG-signed commits — adds a `--sign-commits` flag to init that turns on `config.deposit.sign_commits=true`, after which every deposit commit is GPG-signed. Requires `git config user.signingkey` to be set; if it's empty, init still proceeds but warns that the first ingest will fail until the user wires GPG up.
+> "GPG-sign every deposit commit? (Y/n — Recommended for paper-citable archives)
+>
+> Adds the `--sign-commits` flag to init, setting `config.deposit.sign_commits=true` so every future deposit is GPG-signed."
+
+If the user says yes, check whether a signing key is configured:
+
+```bash
+git config --global user.signingkey
+```
+
+- **A key is configured**: tell the user "Signing key already configured: `<keyid>`. Proceeding with signing on." and continue.
+- **No key configured**: offer to generate one — symmetric to the zstd/git-crypt install offers:
+
+  > "No GPG signing key is configured. I can generate an Ed25519 key for you (modern, small, fast). The passphrase decision matters:
+  >   * **No passphrase** (recommended for an automated archive — the launchd / systemd tick can't answer a passphrase prompt). The key file on disk is the only thing protecting the signature.
+  >   * **Passphrase** — gpg-agent caches it across commits within a session, but background-tick ingests will fail until you unlock.
+  >
+  > Generate now? (Y/n)"
+
+  If yes, ask one more question — whose identity to bind to the key:
+
+  > "Bind the key to which email? Defaults to your `git config --global user.email` value: `<email>`."
+
+  Then generate via `gpg --batch --gen-key` with a config block:
+
+  ```
+  %no-protection
+  Key-Type: EDDSA
+  Key-Curve: ed25519
+  Name-Real: <user.name>
+  Name-Email: <email>
+  Expire-Date: 0
+  %commit
+  ```
+
+  Extract the new key's fingerprint and wire it in:
+
+  ```bash
+  git config --global user.signingkey <FINGERPRINT>
+  git config --global gpg.program "$(command -v gpg)"
+  ```
+
+  Test it produces a signature before continuing:
+
+  ```bash
+  echo test | gpg --clearsign --local-user <FINGERPRINT> > /dev/null
+  ```
+
+  Then offer (optional, for the GitHub "Verified" badge): "Upload the public key to GitHub? Requires the `write:gpg_key` OAuth scope — I can refresh your `gh auth` for it, or you can skip and run `gh gpg-key add` later." If yes, run `gh auth refresh -s write:gpg_key` then `gpg --armor --export <FINGERPRINT> | gh gpg-key add -`.
+
+If the user declines signing entirely, init proceeds with `sign_commits=false`. The archive is still hash-chained — signing is an *additional* tamper layer, not a substitute for the per-session SHA-256.
+
+**Step 5 — Confirm before writing.** Show a summary as a structured table (Markdown table, or aligned text in CLIs that don't render Markdown):
+
+```
+┌─────────────────────────────┬──────────────────────────────────────────────────────┐
+│           Setting           │                       Value                          │
+├─────────────────────────────┼──────────────────────────────────────────────────────┤
+│ Archive path                │ <abs-path>                                           │
+│ Compression                 │ <auto|none|zstd> (resolves to <zstd|none>)           │
+│ Remote                      │ <url-or-none>                                        │
+│ Encrypt transcripts at push │ <yes|no> [(git-crypt <version>)]                     │
+│ Key-loss ack                │ <Confirmed | n/a>                                    │
+│ Auto-push after ingest      │ <yes|no>                                             │
+│ GPG-signed commits          │ <yes|no> [(key <keyid>)]                             │
+└─────────────────────────────┴──────────────────────────────────────────────────────┘
+```
+
+Then ask "Proceed?" Wait for explicit confirmation. The user can still back out and revise any answer.
 
 **Step 6 — Run init.** Call:
 ```bash
@@ -120,18 +187,43 @@ If the script reports `already-ok` or `skipped-not-installed`, no action needed.
 
 **Step 8 — Background-tick opt-in (macOS only).** Ask:
 
-> "Claude Code sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses. It is local-only and never pushes to a remote. Install? (Y/n)"
+> "Claude Code / Codex sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses by running `ingest.py` on a timer.
+>
+> Push behavior follows your auto-push config: with auto-push **on** (your choice), the tick will deposit AND push after each cycle. With auto-push **off**, the tick only deposits locally; pushes remain manual.
+>
+> Install? (Y/n)"
 
 If yes:
 ```bash
 python scripts/install-launchd.py --archive <abs-path>
 ```
 
-If on Linux or Windows, skip this step and tell the user the equivalent can be set up later via systemd user unit (Linux) or Task Scheduler (Windows).
+If on Linux or Windows, skip this step and tell the user the equivalent can be set up later via a user systemd unit (Linux — see `docs/LINUX_SYSTEMD.md`) or Task Scheduler (Windows).
 
-**Step 9 — First ingest.** Run an initial deposit to seed the archive from the existing host-CLI session stores:
+**Step 9a — First-ingest scale warning.** *Before* launching the first ingest, surface the realistic cost. Re-run `scripts/usage_estimate.py --json` to get current numbers and tell the user something like:
+
+> "Your existing host-CLI history is ~N session files totaling ~X GB. The first ingest will:
+>   * Hash each transcript (fast)
+>   * Compress each (zstd, fast)
+>   * Encrypt each via git-crypt (if encryption is on — fast)
+>   * Commit each to the archive (slowest step — ~50 ms each baseline; ~300 ms each with GPG signing on)
+>   * Push to the remote at the end (if auto-push is on — pushes ~Y GB of encrypted blobs)
+>
+> Estimated wall time: ~Z minutes. Subsequent ingests are fast (only new sessions get processed)."
+
+Then offer the user a choice about commit topology for THIS first ingest:
+
+> "Per-session commits or one combined commit for the initial backfill?
+>   * **Per-session** (default): one git commit per deposited session. Granular `git log sessions/X/Y/Z/` history but slow at scale — 6000 commits at 300 ms each = 30+ min just for signing.
+>   * **Bulk-initial**: one combined `bulk-initial: N sessions ingested` commit for all backfilled sessions. Loses per-session ordering inside the initial backfill (they all share one commit) but signs once instead of N times. Future per-session ingests are unaffected.
+>
+> Recommended for a fresh setup with hundreds-plus sessions to backfill: **bulk-initial**. Recommended otherwise: **per-session**."
+
+If they pick bulk-initial, pass the `--bulk-initial` flag.
+
+**Step 9b — First ingest.** Run the initial deposit:
 ```bash
-python scripts/ingest.py --archive <abs-path>
+python scripts/ingest.py --archive <abs-path> [--bulk-initial]
 ```
 
 Report the count of sessions deposited.

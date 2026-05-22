@@ -2,6 +2,24 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-05-22
+
+Wizard polish + first-time-backfill perf, driven by feedback from the first cold-start end-to-end run in a fresh Claude Code session.
+
+### Added
+
+- **`ingest.py --bulk-initial`** — first-time-only mode that bundles ALL transcript-changed deposits into a single `bulk-initial: N session(s) ingested` commit instead of one commit per session. Dramatically faster when `sign_commits=true` (one GPG signature vs. N — saves ~30 min on a 6000-session backfill with signing on). Loses per-session ordering INSIDE the initial backfill (bundled sessions share one commit); future ingests resume per-session commits as normal. The flag is meant to be passed exactly once at first ingest; the launchd / systemd tick never passes it.
+- **SKILL.md wizard Step 4c — GPG-signed commits with key-generation offer.** Previously the signing decision was floating between the auto-push step and the confirm step, almost as an afterthought; now it's grouped with the other trust-model decisions (encryption, auto-push). Symmetric to the zstd / git-crypt install offers, the wizard now detects an empty `user.signingkey` and offers to generate an Ed25519 key (no-passphrase recommended for automated archives, passphrase optional), wires it into `git config --global`, tests it produces a signature, and optionally uploads to GitHub via `gh gpg-key add` for the "Verified" badge.
+- **SKILL.md wizard Step 9a — First-ingest scale warning.** Before launching the first ingest, the wizard now re-runs `usage_estimate.py` and projects the realistic wall time + bytes-to-be-pushed, then asks per-session vs. bulk-initial. Catches first-time users by surprise less.
+- **SKILL.md confirmation table format pinned.** The summary in Step 5 is now a structured table with columns for Setting / Value, recommended as Markdown or aligned text depending on what the host CLI renders.
+
+### Changed
+
+- **SKILL.md wizard Step 8 — launchd tick clarification.** Previously said "local-only and never pushes to a remote," which contradicted the v1.0 auto-push reality. Now correctly: push behavior follows the configured `auto_push` setting; the tick deposits AND pushes when auto-push is on. Removes a real ambiguity that the first cold-start run surfaced (the wizard text self-corrected mid-sentence).
+- **SKILL.md wizard Step 9 split into 9a (scale warning) and 9b (run ingest)**, so the user has a chance to pick `--bulk-initial` before kicking off a long-running command.
+
+---
+
 ## [1.1.0] — 2026-05-22
 
 ### Added
