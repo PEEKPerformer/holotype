@@ -2,6 +2,30 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-22
+
+Bulk-ingest performance improvements. Three orthogonal optimizations land together because they target the same workload (first-time backfill of an existing host-CLI history) and share testing infrastructure.
+
+### Added
+
+- **`ingest.py` auto-chunks oversized `--bulk-initial` commits.** When the projected pack size for a single `bulk-initial:` commit would exceed `--max-pack-gib` (default 1.5 GiB, well under GitHub's undocumented 2.00 GiB single-push ceiling), ingest now bin-packs `sessions/<project-dir>/` subtrees into N chunks and emits one signed `bulk-initial part K/N:` commit per chunk. Under the threshold, the single-commit behavior is unchanged. Bin-packing keeps each project intact in one commit so per-project `git log sessions/<project>/` stays coherent. Eliminates the need for the post-hoc `scripts/repush_chunked.py` recovery path on first ingest.
+
+- **`ingest.py --fast-compress`** — pairs with `--bulk-initial`. Switches the zstd encoder from the locked archival preset (`-19 --long=27`) to fast (`-3`). Typically 3-5× faster compression at <10% ratio cost. Doesn't affect verification: the on-disk file is still valid zstd, `sha256_compressed` is recorded for whatever was written, and decompression produces the canonical bytes regardless of encoder level. Steady-state per-session ingests stay on the archival preset.
+
+- **`holotype.chunking`** module — factored `bin_pack_paths()` + `dir_size_bytes()` out of `scripts/repush_chunked.py` so both the proactive auto-chunking in `ingest.py` and the reactive recovery in `repush_chunked.py` share the same algorithm.
+
+### Changed
+
+- **Deferred FTS index build for `--bulk-initial`.** Under bulk-initial mode, `reindex_session()` now accumulates FTS rows into a per-cycle buffer instead of inserting per-session. End-of-cycle, one `executemany` writes all rows at once and FTS5's `'optimize'` command merges the resulting segments into a compact final form. Per-session FTS5 segment merges were a dominant cost in the v1.1.x bulk path; consolidating into one bulk-insert + one optimize amortizes that overhead.
+
+- **`PRAGMA mmap_size=268435456`** (256 MiB) in `_connect()`. Speeds up scan-heavy queries (FTS rebuild, full archive search) when the DB fits comfortably. Safe to set above the actual DB size; SQLite mmaps lazily.
+
+### Performance notes
+
+The combined v1.2 changes are aimed at reducing first-time bulk-ingest wall time. Conservative estimate from the constituent improvements: ~1.3-2× on encrypted bulk-initial workloads where the FTS path was the dominant cost. Auto-chunking is orthogonal to wall time — it prevents push failures rather than speeding them up.
+
+---
+
 ## [1.1.6] — 2026-05-22
 
 Recovery tooling for first-push failures against GitHub when encrypted bulk-initial commits exceed GitHub's per-push pack-size limit. Encrypted blobs don't benefit from git's pack-zlib delta compression (encrypted bytes are high-entropy), so the wire pack ≈ the sum of the encrypted file sizes. For archives in the 2 GiB+ range this means the first push hits an undocumented server-side rejection.

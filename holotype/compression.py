@@ -40,9 +40,23 @@ COMPRESSED_SUFFIX = ".zst"
 COMPRESSED_TRANSCRIPT = "transcript.jsonl.zst"
 PLAIN_TRANSCRIPT = "transcript.jsonl"
 
-# Locked compression flags. Don't change without re-deriving sha256_compressed
-# across the whole archive — though uncompressed sha256 stays valid either way.
-_ZSTD_COMPRESS_FLAGS = ["-19", "--long=27", "-q"]
+# Archival compression flags: -19 --long=27. Optimizes ratio over speed,
+# right for the long-term storage case. The "fast" preset uses -3 instead
+# and is ~3-5x faster on the compress step at a modest ratio cost
+# (typically <10% larger files). Both write to .jsonl.zst; the file format
+# is identical, only the encoder effort differs. sha256_compressed will
+# vary per level, but sha256 (uncompressed canonical) is invariant — so
+# verification still works the same way regardless of which level was used.
+_ZSTD_FLAGS_ARCHIVAL = ["-19", "--long=27", "-q"]
+_ZSTD_FLAGS_FAST = ["-3", "-q"]
+
+
+def _flags_for_level(level: str) -> list[str]:
+    if level == "fast":
+        return _ZSTD_FLAGS_FAST
+    if level == "archival":
+        return _ZSTD_FLAGS_ARCHIVAL
+    raise ValueError(f"unknown compression level: {level!r} (expected 'archival' or 'fast')")
 
 
 class ZstdMissingError(RuntimeError):
@@ -62,11 +76,19 @@ def _require_zstd() -> None:
         )
 
 
-def compress_bytes(data: bytes) -> bytes:
-    """Compress raw bytes with locked archival flags."""
+def compress_bytes(data: bytes, level: str = "archival") -> bytes:
+    """Compress raw bytes with the chosen level preset.
+
+    ``level="archival"`` (default) uses ``-19 --long=27`` — best ratio,
+    slow. ``level="fast"`` uses ``-3`` — ~3-5× faster encode at modest
+    ratio cost. Both produce valid zstd-framed bytes; decompression is
+    identical for either level. ``ingest.py --fast-compress`` selects
+    "fast" for first-time bulk backfill where wall time matters more
+    than the last few percent of ratio.
+    """
     _require_zstd()
     proc = subprocess.run(
-        ["zstd", *_ZSTD_COMPRESS_FLAGS],
+        ["zstd", *_flags_for_level(level)],
         input=data,
         capture_output=True,
         check=True,

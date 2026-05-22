@@ -41,10 +41,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype import __version__
+from holotype.chunking import bin_pack_paths, dir_size_bytes
 from holotype.compression import compress_bytes, transcript_filename
 from holotype.env import claude_code_version, git_state_for_path, platform_info
 from holotype.hashing import sha256_bytes
 from holotype.index import (
+    bulk_insert_fts_rows,
     open_index,
     reindex_session,
     session_indexed,
@@ -195,6 +197,7 @@ def deposit_one(
     candidate: DepositCandidate,
     *,
     compression: str | None,
+    compression_level: str = "archival",
 ) -> tuple[str, str, bool]:
     """Deposit one candidate. Returns (status, session_id, transcript_changed).
 
@@ -246,7 +249,7 @@ def deposit_one(
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     if compression == "zstd":
-        payload = compress_bytes(data)
+        payload = compress_bytes(data, level=compression_level)
         sha_compressed = sha256_bytes(payload)
     else:
         payload = data
@@ -437,6 +440,8 @@ def update_index(
     candidate: DepositCandidate,
     git_commit: str | None,
     transcript_changed: bool,
+    *,
+    out_fts_rows: list | None = None,
 ) -> None:
     """Reflect a single deposit into the shared SQLite index.
 
@@ -481,7 +486,10 @@ def update_index(
     if not transcript_changed and session_indexed(conn, candidate.session_id):
         return
 
-    reindex_session(conn, candidate.session_id, sess_dir, source_cls=source_cls)
+    reindex_session(
+        conn, candidate.session_id, sess_dir, source_cls=source_cls,
+        out_fts_rows=out_fts_rows,
+    )
 
 
 def acquire_lock(archive: Path):
@@ -515,8 +523,33 @@ def main(argv: list[str] | None = None) -> int:
             "per session. Dramatically faster when GPG signing is on "
             "(one signature vs. N). Loses per-session ordering inside "
             "the initial backfill; future per-session ingests are "
-            "unaffected. Should only be passed once, on the first ingest "
-            "of a new archive."
+            "unaffected. Auto-chunks into multiple commits if the "
+            "projected push pack would exceed --max-pack-gib (default "
+            "1.5 GiB, under GitHub's 2 GiB ceiling). FTS index inserts "
+            "are deferred to a single bulk INSERT + 'optimize' at end."
+        ),
+    )
+    p.add_argument(
+        "--fast-compress",
+        action="store_true",
+        help=(
+            "Use zstd -3 instead of the archival -19 --long=27. ~3-5x "
+            "faster compression at a modest ratio cost (<10% larger "
+            "files typically). Intended for use with --bulk-initial "
+            "where wall time matters more than the last few percent "
+            "of ratio. Per-deposit decision; doesn't affect verification "
+            "(decompression is identical regardless of encoding level)."
+        ),
+    )
+    p.add_argument(
+        "--max-pack-gib",
+        type=float,
+        default=1.5,
+        help=(
+            "Maximum target chunk size in GiB for auto-chunking under "
+            "--bulk-initial (default 1.5). GitHub rejects packs >2 GiB; "
+            "1.5 leaves headroom for git's own object metadata. Ignored "
+            "without --bulk-initial."
         ),
     )
     args = p.parse_args(argv)
@@ -562,11 +595,19 @@ def main(argv: list[str] | None = None) -> int:
         #   unchanged) → one combined `migrate:` commit at end of cycle.
         # - bulk_initial[]: present only when --bulk-initial is passed.
         #   Genuine content changes go here too instead of per-session
-        #   commits, so the first-time backfill signs/commits once.
+        #   commits. Auto-chunked at end if the projected pack exceeds
+        #   --max-pack-gib.
         # - per-session committed: when --bulk-initial is OFF, genuine
         #   content changes get one commit each via commit_deposit().
         migrations: list[tuple[type[Source], DepositCandidate]] = []
         bulk_initial: list[tuple[type[Source], DepositCandidate]] = []
+
+        # FTS-row buffer for --bulk-initial. Sessions accumulate FTS
+        # rows here instead of inserting per-session; a single
+        # bulk_insert_fts_rows() call at end-of-cycle amortizes FTS5
+        # segment merges across the whole batch.
+        bulk_fts_rows: list[tuple] = []
+        compression_level = "fast" if args.fast_compress else "archival"
 
         with open_index(index_path) as conn:
             for source_cls, candidate in candidates:
@@ -575,7 +616,8 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 status, session_id, transcript_changed = deposit_one(
-                    archive, source_cls, candidate, compression=compression
+                    archive, source_cls, candidate, compression=compression,
+                    compression_level=compression_level,
                 )
                 counts[status] = counts.get(status, 0) + 1
 
@@ -584,11 +626,13 @@ def main(argv: list[str] | None = None) -> int:
 
                 if transcript_changed:
                     if args.bulk_initial:
-                        # Defer the git commit; just write index rows
-                        # now (cheap — FTS gets the new content).
+                        # Defer the git commit. Index `messages` rows
+                        # now; collect FTS rows in `bulk_fts_rows` for a
+                        # single bulk-insert at end-of-cycle.
                         update_index(
                             conn, archive, source_cls, candidate, git_commit=None,
                             transcript_changed=True,
+                            out_fts_rows=bulk_fts_rows,
                         )
                         bulk_initial.append((source_cls, candidate))
                     else:
@@ -617,22 +661,94 @@ def main(argv: list[str] | None = None) -> int:
             if pending_since_commit:
                 conn.commit()
 
-        # One combined commit for all bulk-initial deposits (when the
-        # user passed --bulk-initial for first-time backfill). Runs
-        # before the migration commit so the bulk-initial appears first
-        # in `git log` — chronological order for the user.
+        # Bulk-initial commit(s). When the projected pack would exceed
+        # --max-pack-gib, auto-chunk by project directory into N
+        # commits — same shape as repush_chunked.py but proactive.
+        # Single commit when total fits comfortably.
         if bulk_initial:
             bi_candidates = [c for _, c in bulk_initial]
-            bi_commit = commit_bulk_initial(archive, bi_candidates, sign_commits=sign_commits)
-            if bi_commit:
-                committed.append(
-                    f"  bulk-initial  {len(bi_candidates)} session(s) ingested"
-                )
-                with open_index(index_path) as conn2:
-                    conn2.executemany(
-                        "UPDATE sessions SET git_commit = ? WHERE session_id = ?",
-                        [(bi_commit, c.session_id) for _, c in bulk_initial],
+            target_bytes = int(args.max_pack_gib * (1024 ** 3))
+            total_bytes = sum(
+                dir_size_bytes(session_archive_dir(archive, c)) for c in bi_candidates
+            )
+            bi_sha_per_session: dict[str, str] = {}
+
+            if total_bytes <= target_bytes:
+                # Fits in one commit — existing behavior.
+                bi_commit = commit_bulk_initial(archive, bi_candidates, sign_commits=sign_commits)
+                if bi_commit:
+                    committed.append(
+                        f"  bulk-initial  {len(bi_candidates)} session(s) ingested "
+                        f"({total_bytes / (1024**3):.2f} GiB)"
                     )
+                    for c in bi_candidates:
+                        bi_sha_per_session[c.session_id] = bi_commit
+            else:
+                # Bin-pack by project dir to fit under target_bytes per chunk.
+                # Collect unique sessions/<project>/ subtrees touched by
+                # this batch, then bin-pack into chunks. Each chunk
+                # commit covers all candidates whose project dir is in it.
+                project_dirs = sorted({
+                    Path("sessions") / c.archive_subpath.split("/", 1)[0]
+                    for c in bi_candidates
+                })
+                chunks = bin_pack_paths(project_dirs, archive, target_bytes)
+                if not args.quiet:
+                    print(
+                        f"  bulk-initial: {total_bytes / (1024**3):.2f} GiB exceeds "
+                        f"{args.max_pack_gib} GiB target; auto-chunking into "
+                        f"{len(chunks)} commit(s)"
+                    )
+                sources = sorted({c.source_name for c in bi_candidates})
+                src_tag = "+".join(sources) if sources else "?"
+
+                # Map each candidate to its chunk by project dir prefix.
+                chunk_for_project: dict[str, int] = {}
+                for ci, chunk in enumerate(chunks):
+                    for rel in chunk:
+                        chunk_for_project[Path(rel).name] = ci
+
+                for ci, chunk in enumerate(chunks, 1):
+                    CHUNK_ADD = 500
+                    for j in range(0, len(chunk), CHUNK_ADD):
+                        run_git(archive, "add", *chunk[j:j + CHUNK_ADD])
+                    diff = run_git(archive, "diff", "--cached", "--quiet")
+                    if diff.returncode == 0:
+                        continue
+                    msg = (
+                        f"bulk-initial part {ci}/{len(chunks)}: chunked at "
+                        f"{args.max_pack_gib} GiB target [{src_tag}]"
+                    )
+                    commit_args = ["commit", "-m", msg]
+                    if sign_commits:
+                        commit_args.insert(1, "-S")
+                    out = run_git(archive, *commit_args)
+                    if out.returncode != 0:
+                        sys.stderr.write(out.stderr)
+                        continue
+                    sha = git_head_short(archive)
+                    if sha:
+                        for c in bi_candidates:
+                            proj = c.archive_subpath.split("/", 1)[0]
+                            if chunk_for_project.get(proj) == ci - 1:
+                                bi_sha_per_session[c.session_id] = sha
+                        committed.append(
+                            f"  bulk-initial part {ci}/{len(chunks)}: {sha}"
+                        )
+
+            # Backfill sessions.git_commit + bulk-insert FTS rows in
+            # one transaction.
+            if bi_sha_per_session or bulk_fts_rows:
+                with open_index(index_path) as conn2:
+                    if bi_sha_per_session:
+                        conn2.executemany(
+                            "UPDATE sessions SET git_commit = ? WHERE session_id = ?",
+                            [(sha, sid) for sid, sha in bi_sha_per_session.items()],
+                        )
+                    if bulk_fts_rows:
+                        n_fts = bulk_insert_fts_rows(conn2, bulk_fts_rows)
+                        if not args.quiet:
+                            print(f"  bulk-initial: indexed {n_fts} FTS row(s)")
                     conn2.commit()
 
         # One combined commit for all manifest-only refreshes. Runs OUTSIDE

@@ -546,6 +546,83 @@ def main(argv: list[str] | None = None) -> int:
         expect("schema v4" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
 
+        step("--fast-compress + --bulk-initial path is exercised end-to-end")
+        fc_archive = tmp / "archive-fast-compress"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(fc_archive),
+            "--remote-url", "",
+            "--remote-kind", "none",
+            "--compression", "zstd",
+        )
+        expect(result.returncode == 0, f"fast-compress init failed: {result.stderr}")
+        fc_source = materialize_source(tmp / "fc-source-parent")
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(fc_archive),
+            "--source", str(fc_source),
+            "--bulk-initial",
+            "--fast-compress",
+        )
+        expect(result.returncode == 0, f"--fast-compress ingest failed: {result.stderr}")
+        expect("new=3" in result.stdout, f"expected new=3 from fast-compress ingest:\n{result.stdout}")
+        # Every deposit should still be a valid .jsonl.zst with both hashes.
+        for mp in (fc_archive / "sessions").rglob("manifest.json"):
+            m = json.loads(mp.read_text())
+            expect(m["compression"] == "zstd",
+                   f"fast-compress manifest compression wrong: {m.get('compression')}")
+            expect(m["sha256_compressed"] is not None,
+                   "fast-compress sha256_compressed not set")
+            transcript = mp.parent / "transcript.jsonl.zst"
+            expect(transcript.exists(), f"missing .jsonl.zst at {transcript}")
+        # Search should still work — deferred FTS populated via the
+        # bulk-insert path.
+        result = run_script(
+            REPO_ROOT / "scripts" / "search.py", "entanglement",
+            "--archive", str(fc_archive), "--json",
+        )
+        parsed = json.loads(result.stdout)
+        expect(len(parsed) > 0, "FTS query returned 0 hits after deferred-FTS bulk-initial")
+
+        step("--bulk-initial auto-chunks when projected pack exceeds --max-pack-gib")
+        # Force chunking with a tiny target so even our small synthetic
+        # archive trips multiple chunks (each project dir becomes its
+        # own chunk).
+        ac_archive = tmp / "archive-auto-chunk"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(ac_archive),
+            "--remote-url", "",
+            "--remote-kind", "none",
+            "--compression", "none",
+        )
+        expect(result.returncode == 0, f"auto-chunk init failed: {result.stderr}")
+        ac_source = materialize_source(tmp / "ac-source-parent")
+        # Two top-level project dirs in the synthetic source; with a
+        # 1-byte target each project goes into its own chunk → 2
+        # `bulk-initial part N/2` commits.
+        before_log = subprocess.run(
+            ["git", "-C", str(ac_archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        before_count = len(before_log.strip().split("\n"))
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(ac_archive),
+            "--source", str(ac_source),
+            "--bulk-initial",
+            "--max-pack-gib", "0.000001",  # ~1 byte; forces multi-chunk
+        )
+        expect(result.returncode == 0, f"auto-chunk ingest failed: {result.stderr}\n{result.stdout}")
+        after_log = subprocess.run(
+            ["git", "-C", str(ac_archive), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        new_commits = after_log.strip().split("\n")[: len(after_log.strip().split("\n")) - before_count]
+        chunk_commits = [c for c in new_commits if "bulk-initial part" in c]
+        expect(len(chunk_commits) >= 2,
+               f"auto-chunk should produce >= 2 chunk commits, got {len(chunk_commits)}:\n{chr(10).join(new_commits)}")
+
         step("--bulk-initial bundles all new deposits into ONE combined commit")
         # Fresh archive + fresh source → ingest with --bulk-initial.
         # Expect: exactly one "bulk-initial:" commit covers all the

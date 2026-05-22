@@ -35,6 +35,10 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     # Larger cache and temp-in-memory help bulk insert throughput.
     conn.execute("PRAGMA cache_size = -65536")  # 64 MiB
     conn.execute("PRAGMA temp_store = MEMORY")
+    # mmap up to 256 MiB of the DB into the process — speeds up scan-heavy
+    # queries (FTS rebuild, search) when the DB fits comfortably. Safe to
+    # set higher than the actual DB size; SQLite mmaps lazily.
+    conn.execute("PRAGMA mmap_size = 268435456")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -169,6 +173,8 @@ def reindex_session(
     session_id: str,
     session_source: Path,
     source_cls=None,
+    *,
+    out_fts_rows: list | None = None,
 ) -> int:
     """Drop and rewrite all message rows + FTS entries for a single session.
 
@@ -188,6 +194,16 @@ def reindex_session(
     ``executemany``. Avoids per-line Python↔C round trips. On a 6000-
     session bulk re-ingest with the old per-execute pattern this was
     the dominant bottleneck.
+
+    When ``out_fts_rows`` is a list, this function APPENDS the FTS
+    rows it would have inserted to that list and skips the per-session
+    FTS DELETE/INSERT. Used by ``ingest.py --bulk-initial`` to
+    accumulate FTS rows across all sessions and bulk-insert them in
+    one ``executemany`` at end-of-cycle — avoids per-session FTS5
+    segment merge overhead, which dominates the index-write cost
+    during a first-time backfill. When ``out_fts_rows`` is None
+    (default), behavior is unchanged: DELETE + per-session INSERT of
+    FTS rows, transactionally with the messages rows.
     """
     if source_cls is None:
         from holotype.sources.claude_code import ClaudeCodeSource
@@ -195,8 +211,10 @@ def reindex_session(
 
     from holotype.compression import iter_transcript_lines
 
+    defer_fts = out_fts_rows is not None
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-    conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
+    if not defer_fts:
+        conn.execute("DELETE FROM messages_fts WHERE session_id = ?", (session_id,))
 
     if session_source.is_dir():
         line_iter = iter_transcript_lines(session_source)
@@ -252,13 +270,41 @@ def reindex_session(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             message_rows,
         )
-    if fts_rows:
+    if defer_fts:
+        out_fts_rows.extend(fts_rows)
+    elif fts_rows:
         conn.executemany(
             """INSERT INTO messages_fts(content, role, session_id, sequence)
                VALUES (?, ?, ?, ?)""",
             fts_rows,
         )
     return len(message_rows)
+
+
+def bulk_insert_fts_rows(conn: sqlite3.Connection, rows: list[tuple]) -> int:
+    """One-shot bulk insert of accumulated FTS rows + FTS5 'optimize'.
+
+    Used by ``ingest.py --bulk-initial`` at end-of-cycle when
+    ``reindex_session`` was called with ``out_fts_rows=<list>`` for
+    each session. We do one ``executemany`` for all the FTS inserts
+    (instead of N per-session calls), then run FTS5 ``'optimize'`` to
+    merge the resulting segments into a compact final form.
+
+    Returns the number of rows inserted.
+    """
+    if not rows:
+        return 0
+    conn.executemany(
+        """INSERT INTO messages_fts(content, role, session_id, sequence)
+           VALUES (?, ?, ?, ?)""",
+        rows,
+    )
+    # FTS5 'optimize' merges all segments into one. Slower than 'merge'
+    # but produces the smallest on-disk index. Worth it once at the end
+    # of a bulk ingest; not needed for steady-state per-session
+    # additions.
+    conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('optimize')")
+    return len(rows)
 
 
 def session_indexed(conn: sqlite3.Connection, session_id: str) -> bool:

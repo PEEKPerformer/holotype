@@ -53,6 +53,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from holotype.chunking import bin_pack_paths, dir_size_bytes  # noqa: E402
+
 
 def find_archive(explicit: Path | None) -> Path:
     if explicit:
@@ -78,55 +80,6 @@ def run_git(archive: Path, *args: str, check: bool = False) -> subprocess.Comple
 def head_subject(archive: Path) -> str:
     out = run_git(archive, "log", "-1", "--pretty=%s")
     return out.stdout.strip() if out.returncode == 0 else ""
-
-
-def dir_size_bytes(path: Path) -> int:
-    """Return total byte size of a directory subtree (recursive)."""
-    total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                continue
-    return total
-
-
-def bin_pack_paths(
-    project_dirs: list[Path],
-    archive: Path,
-    target_bytes: int,
-) -> list[list[str]]:
-    """Greedy bin-pack of project-dir subtrees into chunks under target_bytes.
-
-    Each input ``project_dirs`` entry is a path like
-    ``sessions/<project-dir-encoded>/`` (relative to archive). The
-    output is a list of chunks; each chunk is a list of
-    ``sessions/<project>/`` strings (also relative to archive) that
-    git can `git add` together.
-
-    Bin-packing keeps each project intact in one chunk — produces a
-    cleaner per-project `git log` than fracturing arbitrary
-    session paths. Uses first-fit-decreasing (FFD): sort projects
-    largest-first, place each in the first chunk it fits, open a new
-    chunk if none fit. For projects larger than ``target_bytes`` we
-    accept they get their own chunk slightly over the target (better
-    than splitting a project across multiple commits).
-    """
-    sized = [(p, dir_size_bytes(archive / p)) for p in project_dirs]
-    sized.sort(key=lambda t: -t[1])
-    chunks: list[tuple[list[str], int]] = []
-    for rel, size in sized:
-        placed = False
-        for chunk, chunk_size in chunks:
-            if chunk_size + size <= target_bytes:
-                chunk.append(str(rel))
-                chunks[chunks.index((chunk, chunk_size))] = (chunk, chunk_size + size)
-                placed = True
-                break
-        if not placed:
-            chunks.append(([str(rel)], size))
-    return [c for c, _ in chunks]
 
 
 def launchd_label_path() -> Path:

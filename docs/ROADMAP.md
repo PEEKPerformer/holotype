@@ -2,43 +2,9 @@
 
 Captured candidate work for future versions, with honest tradeoffs and rough impact estimates. Filed here (not in CHANGELOG — CHANGELOG is for shipped things) so the next contributor has a starting point.
 
-## v1.2 candidates (incremental, no architectural risk)
+## v1.2 candidates — SHIPPED in v1.2.0
 
-### Deferred FTS rebuild on bulk ingest
-
-Currently `reindex_session()` populates `messages_fts` via `executemany` per session. SQLite FTS5 supports an explicit `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` operation that batches segment merges across many sessions much faster than per-row inserts.
-
-**Plan**: For `--bulk-initial` only, skip the `messages_fts` insert in `reindex_session` and call `rebuild` once at end-of-cycle.
-
-**Expected impact**: ~1.3× on bulk-initial. Negligible on steady-state ingest.
-
-**Risk**: Low. Behavior change is contained to bulk-initial path.
-
----
-
-### `--fast-compress` flag for `--bulk-initial`
-
-Compression is currently locked at `zstd -19 --long=27` — optimizing for ratio over speed, which is right for archival data but wasteful when the user is waiting in the foreground during first-time backfill.
-
-**Plan**: Add `--fast-compress` (zstd -3) flag that pairs with `--bulk-initial`. Subsequent ingests stay at the archival level. Manifest's `compression` field would record `"zstd-fast"` vs `"zstd"` so reviewers know which level was used (verification still works — they hash the stored bytes either way).
-
-**Expected impact**: ~2-3× on the compression step, ~1.1× overall during bulk-initial.
-
-**Risk**: Low. Per-session compression level is allowed to vary because `sha256_compressed` records the actual stored bytes.
-
----
-
-### `PRAGMA mmap_size=268435456` on the SQLite index
-
-Our v4 index is ~160 MB on a 3000-session archive. Adding `mmap_size=256MB` gives SQLite room to map the whole DB into memory.
-
-**Plan**: One line in `_connect()` in `holotype/index.py`.
-
-**Expected impact**: ~1.05-1.1× on search-heavy workloads. Negligible on bulk-ingest (already disk-bound on writes).
-
-**Risk**: Trivial.
-
----
+The v1.2 list (deferred FTS, --fast-compress, mmap_size) shipped in `v1.2.0`. See `CHANGELOG.md` for the full set. Auto-chunking of oversized bulk-initial commits also landed there (was originally a v1.1.6 recovery-tool concept; promoted to ingest-side prevention).
 
 ### Investigate `git-crypt` long-running filter mode — INVESTIGATED, NOT AVAILABLE
 
