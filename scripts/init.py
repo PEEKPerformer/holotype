@@ -71,6 +71,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--sign-commits",
+        action="store_true",
+        help=(
+            "GPG-sign every deposit commit (config.deposit.sign_commits=true). "
+            "Requires a configured GPG signing key. ingest.py refuses to proceed "
+            "if the key isn't available — better to fail than silently produce "
+            "unsigned commits in an archive the user thinks is signed."
+        ),
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         help="Overwrite an existing archive's config (DANGEROUS).",
@@ -118,11 +128,27 @@ def write_verify_md(archive: Path) -> None:
 
             ## Manifest fields used for verification
 
-            | Field                | Meaning                                                              |
-            |----------------------|----------------------------------------------------------------------|
-            | `sha256`             | SHA-256 of the **uncompressed** JSONL bytes (canonical / citation hash) |
-            | `sha256_compressed`  | SHA-256 of the on-disk `.jsonl.zst` (only set when compression is on)|
-            | `compression`        | `null` or `"zstd"`                                                   |
+            | Field                          | Meaning                                                              |
+            |--------------------------------|----------------------------------------------------------------------|
+            | `sha256`                       | SHA-256 of the **uncompressed** JSONL bytes (canonical / citation hash) |
+            | `sha256_compressed`            | SHA-256 of the on-disk `.jsonl.zst` (only set when compression is on)|
+            | `compression`                  | `null` or `"zstd"`                                                   |
+            | `manifest_version`             | Schema version (currently 4)                                         |
+
+            ## Reproducibility fields (manifest_version >= 4)
+
+            These let a reviewer reproduce the experiment, not just confirm bytes haven't changed.
+
+            | Field                          | Meaning                                                              |
+            |--------------------------------|----------------------------------------------------------------------|
+            | `project_git_state`            | `{commit, commit_short, branch, dirty, remote, captured_at}` for the project repo the LLM operated on. `captured_at` is `session-start` (most accurate; sourced from the host CLI's own session header) or `deposit` (probed by holotype at deposit time). `null` if no git repo was detectable. |
+            | `wall_clock_seconds`           | `last_timestamp - first_timestamp` in seconds                        |
+            | `total_input_tokens`           | Sum of input tokens billed across the session (`null` if the source didn't report) |
+            | `total_output_tokens`          | Sum of output tokens billed across the session                       |
+            | `total_cache_creation_tokens`  | Sum of cache-creation tokens (Claude Code; absent elsewhere)         |
+            | `total_cache_read_tokens`      | Sum of cache-read / cached-input tokens                              |
+
+            To reproduce a session: take the manifest's `project_git_state.commit`, `git checkout` it in the referenced repo, install the recorded host CLI version (from `env.claude_code_version`), and replay against the same tool surface.
 
             ## Two verification tracks
 
@@ -238,7 +264,13 @@ def write_archive_readme(archive: Path) -> None:
     )
 
 
-def write_config(archive: Path, remote_url: str, remote_kind: str, compression: str) -> None:
+def write_config(
+    archive: Path,
+    remote_url: str,
+    remote_kind: str,
+    compression: str,
+    sign_commits: bool,
+) -> None:
     config = {
         "archive_format_version": ARCHIVE_FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -253,7 +285,7 @@ def write_config(archive: Path, remote_url: str, remote_kind: str, compression: 
         },
         "deposit": {
             "commit_strategy": "per-session",
-            "sign_commits": False,
+            "sign_commits": sign_commits,
             "compression": compression,
         },
         "verification": {
@@ -354,7 +386,22 @@ def init_archive(args: argparse.Namespace) -> int:
     if is_new_repo:
         run(["git", "init", "-b", "main"], cwd=archive)
 
-    write_config(archive, args.remote_url, args.remote_kind, args.compression)
+    if args.sign_commits:
+        # Probe for a signing key. Don't fail init outright — the user
+        # may want to wire up gpg right after init — but loudly warn.
+        probe = subprocess.run(
+            ["git", "config", "--get", "user.signingkey"],
+            capture_output=True, text=True,
+        )
+        if not probe.stdout.strip():
+            print(
+                "init: --sign-commits requested but `git config user.signingkey` "
+                "is empty. Set it (e.g. `git config --global user.signingkey "
+                "<KEYID>`) before the first ingest, or future deposits will fail.",
+                file=sys.stderr,
+            )
+
+    write_config(archive, args.remote_url, args.remote_kind, args.compression, args.sign_commits)
     write_archive_readme(archive)
     write_verify_md(archive)
     write_archive_gitignore(archive)
@@ -396,6 +443,7 @@ def init_archive(args: argparse.Namespace) -> int:
     print(f"  remote:      {args.remote_url or '(none — local only)'}")
     print(f"  remote kind: {args.remote_kind}")
     print(f"  compression: {args.compression}")
+    print(f"  sign commits: {args.sign_commits}")
     print()
     print("Next steps:")
     print("  - To deposit sessions:  python scripts/ingest.py")

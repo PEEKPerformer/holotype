@@ -20,7 +20,7 @@ from holotype.hashing import sha256_bytes, sha256_file
 from holotype.sources.base import Source
 
 
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
 
 
 @dataclass
@@ -55,6 +55,30 @@ class SessionManifest:
     # zstd verify the deposit by hashing the file as-is.
     compression: str | None = None
     sha256_compressed: str | None = None
+    # Reproducibility fields (manifest_version >= 4). All nullable — for
+    # older manifests, sources without the relevant data, or when the
+    # signal couldn't be captured.
+    #
+    # project_git_state: dict with {commit, commit_short, branch, dirty,
+    #   remote, captured_at}. captured_at is "session-start" for Codex
+    #   (sourced from the rollout header — accurate to the moment the
+    #   LLM ran) or "deposit" (probed by ingest.py from the recorded
+    #   cwd — accurate only if the repo hasn't moved past the session
+    #   since). A reviewer should prefer session-start when it's there.
+    # wall_clock_seconds: last_timestamp - first_timestamp in seconds.
+    #   Methods-section nicety; not a substitute for actually citing
+    #   per-turn timing from the transcript.
+    # total_input_tokens / total_output_tokens / total_cache_*_tokens:
+    #   aggregated from the per-turn usage block when the host CLI
+    #   records it (Claude Code does; Codex partially; Antigravity
+    #   doesn't currently expose it). None means "not recorded by this
+    #   source," not "zero."
+    project_git_state: dict | None = None
+    wall_clock_seconds: float | None = None
+    total_input_tokens: int | None = None
+    total_output_tokens: int | None = None
+    total_cache_creation_tokens: int | None = None
+    total_cache_read_tokens: int | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
@@ -93,18 +117,57 @@ def scan_jsonl_lines(lines, source_cls: type[Source]) -> dict:
         "has_thinking": False,
         "has_compaction": False,
         "project_dir_cwd": None,
+        # Reproducibility aggregates (manifest v4):
+        "session_metadata": None,           # from header line(s)
+        "usage_cumulative": None,           # last "cumulative" reading wins
+        "usage_delta_sum": {                # summed over "delta" readings
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "reasoning_output_tokens": 0,
+        },
+        "any_usage_seen": False,
     }
 
     for line in lines:
         info = source_cls.parse_line(line)
         if info is None:
             continue
-        # Skip the session-header pseudo-record (Codex line-1).
+        # Header-flagged lines aren't user-visible messages (don't count
+        # toward message_count), but they DO carry timestamps we want to
+        # propagate. Codex emits many header-flagged lines mid-session
+        # (turn_context, token_count) — the last one's timestamp is a
+        # better last_timestamp than just line-0's. We still preserve
+        # the session_metadata from the first header that supplied it.
         if "header" in info.flags:
-            if info.timestamp and state["first_timestamp"] is None:
-                state["first_timestamp"] = info.timestamp
+            if info.timestamp:
+                if state["first_timestamp"] is None:
+                    state["first_timestamp"] = info.timestamp
                 state["last_timestamp"] = info.timestamp
+            if isinstance(info.session_metadata, dict) and state["session_metadata"] is None:
+                state["session_metadata"] = info.session_metadata
+            if info.model:
+                state["models"].add(info.model)
+            if isinstance(info.usage, dict):
+                state["any_usage_seen"] = True
+                if info.token_count_kind == "cumulative":
+                    state["usage_cumulative"] = info.usage
             continue
+
+        # Token usage aggregation. Sources mark each usage payload as
+        # "cumulative" (Codex's token_count event) or "delta" (Claude
+        # Code's per-turn message.usage). We trust the last cumulative
+        # reading when present; otherwise sum the deltas.
+        if isinstance(info.usage, dict):
+            state["any_usage_seen"] = True
+            if info.token_count_kind == "cumulative":
+                state["usage_cumulative"] = info.usage
+            else:
+                for k in state["usage_delta_sum"]:
+                    v = info.usage.get(k)
+                    if isinstance(v, int):
+                        state["usage_delta_sum"][k] += v
 
         state["message_count"] += 1
         if info.timestamp:
@@ -143,6 +206,51 @@ def scan_jsonl(path: Path, source_cls: type[Source]) -> dict:
         return scan_jsonl_lines(f, source_cls)
 
 
+def _resolve_token_totals(state: dict) -> dict:
+    """Pick the most trustworthy view of token usage and normalize keys.
+
+    Prefers a final cumulative reading (e.g. Codex's last token_count
+    event) over summed deltas. Returns {input, output, cache_creation,
+    cache_read} or all-None if nothing was recorded.
+    """
+    out = {
+        "total_input_tokens": None,
+        "total_output_tokens": None,
+        "total_cache_creation_tokens": None,
+        "total_cache_read_tokens": None,
+    }
+    if not state.get("any_usage_seen"):
+        return out
+    cum = state.get("usage_cumulative")
+    delta = state.get("usage_delta_sum") or {}
+    src = cum if isinstance(cum, dict) else delta
+    def _pick(*keys):
+        for k in keys:
+            v = src.get(k) if isinstance(src, dict) else None
+            if isinstance(v, int):
+                return v
+        return None
+    out["total_input_tokens"] = _pick("input_tokens", "prompt_tokens")
+    out["total_output_tokens"] = _pick("output_tokens", "completion_tokens")
+    out["total_cache_creation_tokens"] = _pick("cache_creation_input_tokens", "cache_creation_tokens")
+    out["total_cache_read_tokens"] = _pick("cache_read_input_tokens", "cached_input_tokens")
+    return out
+
+
+def _wall_clock_seconds(first: str | None, last: str | None) -> float | None:
+    if not first or not last:
+        return None
+    try:
+        from datetime import datetime
+        # Allow "Z" suffix (Codex / Antigravity) by normalizing to +00:00.
+        f = datetime.fromisoformat(first.replace("Z", "+00:00"))
+        l = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        seconds = (l - f).total_seconds()
+        return round(seconds, 3) if seconds >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
 def build_manifest(
     raw_jsonl: bytes,
     source_cls: type[Source],
@@ -156,6 +264,7 @@ def build_manifest(
     parent_session_id: str | None = None,
     compression: str | None = None,
     sha256_compressed: str | None = None,
+    project_git_state: dict | None = None,
 ) -> SessionManifest:
     """Build a SessionManifest from already-read uncompressed JSONL bytes.
 
@@ -176,6 +285,14 @@ def build_manifest(
     """
     scan = scan_jsonl_lines(raw_jsonl.splitlines(keepends=True), source_cls)
     decoded_cwd = scan.get("project_dir_cwd")
+    token_totals = _resolve_token_totals(scan)
+
+    # Prefer the header-derived git_state (more accurate — captured at
+    # session-start) over the deposit-time probe ingest passed in. If
+    # only one is present, use it. If both, header wins.
+    header_meta = scan.get("session_metadata") or {}
+    header_git = header_meta.get("git_state") if isinstance(header_meta, dict) else None
+    resolved_git_state = header_git or project_git_state
 
     return SessionManifest(
         manifest_version=MANIFEST_VERSION,
@@ -201,4 +318,10 @@ def build_manifest(
         env=env or {},
         compression=compression,
         sha256_compressed=sha256_compressed,
+        project_git_state=resolved_git_state,
+        wall_clock_seconds=_wall_clock_seconds(scan["first_timestamp"], scan["last_timestamp"]),
+        total_input_tokens=token_totals["total_input_tokens"],
+        total_output_tokens=token_totals["total_output_tokens"],
+        total_cache_creation_tokens=token_totals["total_cache_creation_tokens"],
+        total_cache_read_tokens=token_totals["total_cache_read_tokens"],
     )

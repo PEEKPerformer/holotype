@@ -64,11 +64,13 @@ Then offer:
 **Step 4 — If a remote was chosen, get the URL.** For GitHub, also ask for org/account and repo name and offer to `gh repo create --private` it on the fly (but only if the user says "yes" — never silently).
 
 **Step 5 — Confirm before writing.** Show a summary:
-> "I'll create the archive at `<path>` as a new git repo. Compression: `<auto|none|zstd>` (resolves to `<zstd|none>` on this system). Remote: `<url-or-none>`. Push policy: manual (never automatic). Proceed?"
+> "I'll create the archive at `<path>` as a new git repo. Compression: `<auto|none|zstd>` (resolves to `<zstd|none>` on this system). GPG-signed commits: `<yes|no>`. Remote: `<url-or-none>`. Push policy: manual (never automatic). Proceed?"
+
+For high-stakes archives (anything destined for a paper's Zenodo deposit), additionally offer GPG-signed commits — adds a `--sign-commits` flag to init that turns on `config.deposit.sign_commits=true`, after which every deposit commit is GPG-signed. Requires `git config user.signingkey` to be set; if it's empty, init still proceeds but warns that the first ingest will fail until the user wires GPG up.
 
 **Step 6 — Run init.** Call:
 ```bash
-python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none> --compression <auto|none|zstd>
+python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none> --compression <auto|none|zstd> [--sign-commits]
 ```
 
 The script writes `<archive>/.holotype/config.json` (including the *resolved* compression mode — `auto` is replaced with the concrete choice), drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive. If `--compression zstd` is forced but zstd isn't on PATH, init exits 2; `--compression auto` falls back to plain JSONL with a notice.
@@ -172,6 +174,7 @@ Read these before any operation:
 | Just the citation string for one session | `python scripts/cite.py <session-id> --citation-only` |
 | Print the manifest for one session | `python scripts/cite.py <session-id> --manifest-only` |
 | Produce a full citable bundle for one session | `python scripts/cite.py <session-id>` |
+| Bundle many sessions for a paper's Zenodo deposit | `python scripts/paper_bundle.py --sessions a,b,c --out <dir> [--tarball]` |
 | Verify the archive's hash chain | `python scripts/verify.py` |
 | Verify a single session | `python scripts/verify.py <session-id>` |
 | Drop and rebuild the SQLite index from the canonical archive | `python scripts/reindex.py` |

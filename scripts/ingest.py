@@ -42,10 +42,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from holotype import __version__
 from holotype.compression import compress_bytes, transcript_filename
-from holotype.env import claude_code_version, platform_info
+from holotype.env import claude_code_version, git_state_for_path, platform_info
 from holotype.hashing import sha256_bytes
 from holotype.index import open_index, reindex_session, upsert_session
-from holotype.manifest import build_manifest
+from holotype.manifest import MANIFEST_VERSION, build_manifest
 from holotype.sources import ALL_SOURCES, source_by_name
 from holotype.sources.base import DepositCandidate, Source
 
@@ -156,14 +156,19 @@ def session_archive_dir(archive: Path, candidate: DepositCandidate) -> Path:
     return archive / "sessions" / candidate.archive_subpath
 
 
-def existing_sha256(archive: Path, candidate: DepositCandidate) -> str | None:
+def existing_manifest(archive: Path, candidate: DepositCandidate) -> dict | None:
     manifest_path = session_archive_dir(archive, candidate) / "manifest.json"
     if not manifest_path.exists():
         return None
     try:
-        return json.loads(manifest_path.read_text()).get("sha256")
+        return json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def existing_sha256(archive: Path, candidate: DepositCandidate) -> str | None:
+    m = existing_manifest(archive, candidate)
+    return m.get("sha256") if m else None
 
 
 def run_git(archive: Path, *args: str) -> subprocess.CompletedProcess:
@@ -211,14 +216,18 @@ def deposit_one(
     dest_transcript = dest_dir / on_disk_name
     dest_manifest = dest_dir / "manifest.json"
 
-    prior_sha = existing_sha256(archive, candidate)
+    prior_manifest = existing_manifest(archive, candidate)
+    prior_sha = prior_manifest.get("sha256") if prior_manifest else None
+    prior_version = prior_manifest.get("manifest_version") if prior_manifest else None
 
     # Idempotency: short-circuit before writing anything if the new bytes
-    # match what's already deposited. The manifest's `sha256` is always
-    # the uncompressed canonical hash, so this comparison is correct
-    # whether the archive is compressed or not.
+    # match what's already deposited AND the manifest is the current
+    # schema version. Older-version manifests get re-processed so they
+    # pick up new fields (project_git_state, token totals, etc.) — this
+    # is critical when a Source parser bug fix would otherwise be hidden
+    # behind the "unchanged sha" short-circuit.
     new_sha = sha256_bytes(data)
-    if prior_sha == new_sha:
+    if prior_sha == new_sha and prior_version == MANIFEST_VERSION:
         return ("skipped-unchanged", session_id)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -249,6 +258,21 @@ def deposit_one(
         "claude_code_version": claude_code_version(),
         "platform": platform_info(),
     }
+
+    # Probe the project's git state at deposit time, using the cwd the
+    # host CLI recorded (decoded from the project_dir_encoded string).
+    # If the source itself recorded a session-start git snapshot (e.g.
+    # Codex's session_meta), build_manifest will prefer that — the
+    # deposit-time probe is the fallback.
+    deposit_time_git = None
+    from holotype.manifest import project_dir_decoded as _decode
+    decoded = _decode(candidate.project_dir_encoded)
+    if decoded:
+        try:
+            deposit_time_git = git_state_for_path(Path(decoded))
+        except Exception:
+            deposit_time_git = None
+
     manifest = build_manifest(
         data,
         source_cls,
@@ -261,6 +285,7 @@ def deposit_one(
         parent_session_id=candidate.parent_session_id,
         compression=compression,
         sha256_compressed=sha_compressed,
+        project_git_state=deposit_time_git,
     )
 
     tmp_manifest = dest_manifest.with_suffix(".json.partial")
@@ -274,6 +299,7 @@ def commit_deposit(
     archive: Path,
     candidate: DepositCandidate,
     status: str,
+    sign_commits: bool = False,
 ) -> str | None:
     rel = f"sessions/{candidate.archive_subpath}"
     run_git(archive, "add", rel)
@@ -282,7 +308,10 @@ def commit_deposit(
         return None
     verb = "deposit" if status == "new" else "update"
     msg = f"{verb}: [{candidate.source_name}] {rel}"
-    out = run_git(archive, "commit", "-m", msg)
+    commit_args = ["commit", "-m", msg]
+    if sign_commits:
+        commit_args.insert(1, "-S")
+    out = run_git(archive, *commit_args)
     if out.returncode != 0:
         sys.stderr.write(out.stderr)
         return None
@@ -350,9 +379,11 @@ def main(argv: list[str] | None = None) -> int:
 
     archive = find_archive(args.archive)
     config = load_config(archive)
-    compression = (config.get("deposit") or {}).get("compression") or None
+    deposit_cfg = config.get("deposit") or {}
+    compression = deposit_cfg.get("compression") or None
     if compression == "none":
         compression = None
+    sign_commits = bool(deposit_cfg.get("sign_commits"))
     candidates = discover_candidates(config, args.source, args.source_name)
 
     if not candidates and not args.dry_run:
@@ -380,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
             counts[status] = counts.get(status, 0) + 1
 
             if status in ("new", "updated"):
-                commit = commit_deposit(archive, candidate, status)
+                commit = commit_deposit(archive, candidate, status, sign_commits=sign_commits)
                 update_index(archive, source_cls, candidate, commit)
                 committed.append(f"  {status:>8s}  [{source_cls.name}] {candidate.archive_subpath}")
 

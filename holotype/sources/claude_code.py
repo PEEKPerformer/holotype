@@ -104,6 +104,9 @@ class ClaudeCodeSource(Source):
         role = (msg.get("role") if msg else None) or obj.get("type")
         model = msg.get("model") if msg else None
         timestamp = obj.get("timestamp")
+        usage = msg.get("usage") if msg else None
+        if not isinstance(usage, dict):
+            usage = None
 
         has_tool_use = False
         has_thinking = False
@@ -144,4 +147,5 @@ class ClaudeCodeSource(Source):
             has_thinking=has_thinking,
             fts_content="\n".join(parts),
             flags=flags,
+            usage=usage,
         )

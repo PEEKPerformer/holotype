@@ -63,6 +63,24 @@ class MessageInfo:
     # For Source-specific signals (compaction markers, etc.) that the
     # manifest scanner aggregates over the full file.
     flags: set[str]
+    # Optional per-turn LLM token usage. When the host CLI exposes a
+    # `usage` block (Claude Code does, Codex sometimes does, Antigravity
+    # currently doesn't), Sources should fill this with the raw fields
+    # they observed. None = "this source didn't report usage for this
+    # turn." The manifest scanner sums it across the transcript.
+    usage: dict | None = None
+    # Optional session-level metadata extracted from a "header" line
+    # (Codex line-0 session_meta is the canonical example — it carries
+    # the git block captured at session-start, more accurate than what
+    # ingest.py can probe at deposit-time). When non-None, the manifest
+    # scanner harvests it once and treats `flags = {"header"}` as the
+    # marker that "this is a header, don't count it as a message."
+    session_metadata: dict | None = None
+    # Whether this Codex-style token_count event is cumulative (carries
+    # totals-to-date) or per-turn delta. The aggregator picks the last
+    # cumulative reading when present; otherwise it sums per-turn deltas.
+    # Sources that don't report token usage leave this None.
+    token_count_kind: str | None = None  # "cumulative" | "delta" | None
 
 
 class Source(ABC):

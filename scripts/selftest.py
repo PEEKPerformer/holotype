@@ -204,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest["sha256"] == recomputed,
                 f"sha256 mismatch for {tr}: manifest={manifest['sha256']}, recomputed={recomputed}",
             )
-            expect(manifest["manifest_version"] == 3, "manifest_version != 3")
+            expect(manifest["manifest_version"] == 4, "manifest_version != 4")
             expect(manifest.get("source") == "claude-code",
                    f"manifest.source wrong: {manifest.get('source')}")
             expect(manifest["message_count"] > 0, "message_count is zero")
@@ -420,6 +420,24 @@ def main(argv: list[str] | None = None) -> int:
         expect(codex_manifest["has_thinking"] is True, "codex reasoning block missed")
         expect(codex_manifest["has_tool_use"] is True, "codex function_call missed")
         expect(codex_manifest["message_count"] >= 2, "codex message count too low")
+        # Manifest v4: codex fixture has a session_meta with git block + a
+        # token_count event. Both must round-trip into the manifest.
+        gs = codex_manifest.get("project_git_state")
+        expect(isinstance(gs, dict) and gs.get("commit") == "abc123def456789",
+               f"codex git_state not propagated from session_meta: {gs}")
+        expect(gs.get("captured_at") == "session-start",
+               f"codex git_state captured_at should be session-start: {gs}")
+        expect(codex_manifest.get("total_input_tokens") == 4321,
+               f"codex total_input_tokens wrong: {codex_manifest.get('total_input_tokens')}")
+        expect(codex_manifest.get("total_output_tokens") == 127,
+               f"codex total_output_tokens wrong: {codex_manifest.get('total_output_tokens')}")
+        expect(codex_manifest.get("wall_clock_seconds") and codex_manifest["wall_clock_seconds"] > 0,
+               f"codex wall_clock_seconds wrong: {codex_manifest.get('wall_clock_seconds')}")
+        expect("gpt-5.5" in codex_manifest.get("models", []),
+               f"codex models should include 'gpt-5.5' from turn_context: {codex_manifest.get('models')}")
+        # And model_provider must NOT pollute the models list.
+        expect("openai" not in codex_manifest.get("models", []),
+               "codex models contains 'openai' — that's the provider, not a model id")
 
         step("Codex FTS hits work (reasoning + tool-call content)")
         result = run_script(
@@ -482,6 +500,40 @@ def main(argv: list[str] | None = None) -> int:
         step("Antigravity deposit verifies clean alongside other sources")
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, f"three-source verify failed: {result.stderr}")
+
+        step("paper_bundle.py packages multiple sessions with a master manifest")
+        # Pull a Claude Code session + the Codex one + the Antigravity one.
+        bundle_out = tmp / "paper-bundle"
+        cc_first = next(p for p in (archive / "sessions").rglob("manifest.json")
+                        if "antigravity" not in str(p) and "codex" not in str(p)).parent.name
+        # Use full UUIDs to disambiguate the synthetic fixtures (which
+        # share the leading "00000000" prefix).
+        result = run_script(
+            REPO_ROOT / "scripts" / "paper_bundle.py",
+            "--sessions", f"{cc_first},deadbeef,{ag_uuid}",
+            "--archive", str(archive),
+            "--out", str(bundle_out),
+            "--paper-title", "Selftest paper",
+        )
+        expect(result.returncode == 0, f"paper_bundle failed: {result.stderr}\n{result.stdout}")
+        bm_path = bundle_out / "BUNDLE_MANIFEST.json"
+        expect(bm_path.exists(), "BUNDLE_MANIFEST.json not written")
+        bm = json.loads(bm_path.read_text())
+        expect(bm["session_count"] == 3, f"BUNDLE_MANIFEST session_count wrong: {bm['session_count']}")
+        expect(bm["paper_title"] == "Selftest paper", "paper_title not stored")
+        bundle_shas = {s["sha256"] for s in bm["sessions"]}
+        expect(len(bundle_shas) == 3, f"expected 3 distinct sha256s in bundle, got {bundle_shas}")
+        # Every bundled session must ship a PLAIN transcript.jsonl that
+        # hashes to its recorded sha256 — that's the verify-without-zstd
+        # property of paper_bundle.
+        for sess in bm["sessions"]:
+            sid = sess["session_id"]
+            bundled = bundle_out / sid / "transcript.jsonl"
+            expect(bundled.exists(), f"bundle missing transcript for {sid}")
+            recomputed = sha256_file(bundled)
+            expect(recomputed == sess["sha256"],
+                   f"bundle transcript hash mismatch for {sid}: {recomputed} != {sess['sha256']}")
+        expect((bundle_out / "VERIFY.md").exists(), "paper bundle missing VERIFY.md")
 
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at

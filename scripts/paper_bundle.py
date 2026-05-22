@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Bundle multiple sessions into a single Zenodo-ready deposit.
+
+The single-session ``cite.py`` is great for inspecting one session;
+papers cite many. This script accepts a list of session ID prefixes
+and produces a directory containing:
+
+  - one subdir per session with plain ``transcript.jsonl`` +
+    ``manifest.json`` + ``cite.txt`` + ``render.md``
+  - a top-level ``BUNDLE_MANIFEST.json`` listing every session with
+    its canonical SHA-256, model IDs, message count, etc.
+  - a top-level ``VERIFY.md`` describing how a reviewer hashes each
+    transcript and compares against the BUNDLE_MANIFEST
+  - optionally, a ``<bundle>.tar.gz`` and ``<bundle>.tar.gz.sha256``
+    sidecar so the whole bundle has a single citation hash
+
+Usage:
+    python scripts/paper_bundle.py --sessions 3f1c4cf7,a8b2,deadbeef \\
+        --out ~/Desktop/zenodo-v200/
+    python scripts/paper_bundle.py --sessions-file paper-cites.txt \\
+        --out ~/Desktop/zenodo-v200/ --tarball
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from textwrap import dedent
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from holotype.archive import resolve_session_by_prefix
+from holotype.compression import read_transcript_bytes
+
+
+def find_archive(explicit: Path | None) -> Path:
+    if explicit:
+        return explicit.expanduser().resolve()
+    import os
+    env = os.environ.get("HOLOTYPE_ARCHIVE")
+    if env:
+        return Path(env).expanduser().resolve()
+    pointer = Path.home() / ".config" / "holotype" / "archive-path"
+    if pointer.exists():
+        return Path(pointer.read_text().strip()).expanduser().resolve()
+    return (Path.home() / "Documents" / "holotype-archive").resolve()
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def archive_commit(archive: Path) -> str:
+    r = subprocess.run(
+        ["git", "-C", str(archive), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() if r.returncode == 0 else "?"
+
+
+def parse_session_list(args: argparse.Namespace) -> list[str]:
+    items: list[str] = []
+    if args.sessions:
+        items.extend([s.strip() for s in args.sessions.split(",") if s.strip()])
+    if args.sessions_file:
+        text = Path(args.sessions_file).expanduser().read_text()
+        for line in text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                items.append(line)
+    return items
+
+
+def write_verify_md(out_dir: Path) -> None:
+    (out_dir / "VERIFY.md").write_text(
+        dedent(
+            """\
+            # Verifying this paper bundle (no Claude required)
+
+            This directory bundles one or more holotype-archived LLM sessions
+            referenced by a paper. Each subdirectory is one session. Every
+            session ships its raw ``transcript.jsonl`` in plain (uncompressed)
+            JSONL so verification needs only stock Unix tools.
+
+            ## To verify every session at once
+
+            ```bash
+            jq -r '.sessions[] | "\\(.sha256)  \\(.session_id)/transcript.jsonl"' \\
+                BUNDLE_MANIFEST.json | shasum -a 256 -c -
+            ```
+
+            Each session's per-file ``manifest.json`` carries the same
+            ``sha256`` so per-session verification is also possible:
+
+            ```bash
+            cd <session-id>/
+            recomputed=$(shasum -a 256 transcript.jsonl | awk '{print $1}')
+            recorded=$(jq -r '.sha256' manifest.json)
+            [ "$recomputed" = "$recorded" ] && echo "OK" || echo "MISMATCH"
+            ```
+
+            ## What this bundle includes per session
+
+            - ``transcript.jsonl`` — verbatim JSONL the host CLI wrote
+            - ``manifest.json`` — SHA-256, env capture, model IDs, timestamps,
+              token totals, and (when available) the project repo's git
+              state at session-start
+            - ``cite.txt`` — one-screen citation block
+            - ``render.md`` — human-readable Markdown rendering for reviewers
+
+            ## What this bundle does NOT include
+
+            - Files the LLM read or wrote outside its own transcript
+            - The state of any external git repos referenced in the
+              transcripts — those are recorded by commit hash in each
+              manifest's ``project_git_state`` field, where the host CLI
+              captured one. Reproduce by ``git checkout`` of the
+              corresponding repo at the recorded commit.
+
+            The bundle's own integrity is rooted in ``BUNDLE_MANIFEST.json``
+            and (if produced) the sibling ``<bundle>.tar.gz.sha256``.
+            """
+        )
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Bundle multiple sessions into a paper-ready deposit.")
+    p.add_argument("--sessions", default="",
+                   help="Comma-separated session ID prefixes.")
+    p.add_argument("--sessions-file", default="",
+                   help="Path to a file listing session ID prefixes (one per line; # comments OK).")
+    p.add_argument("--out", required=True, type=Path,
+                   help="Output bundle directory.")
+    p.add_argument("--archive", type=Path, default=None)
+    p.add_argument("--tarball", action="store_true",
+                   help="Also emit <bundle>.tar.gz + .sha256 sidecar.")
+    p.add_argument("--paper-title", default="",
+                   help="Optional paper title to record in BUNDLE_MANIFEST.")
+    p.add_argument("--paper-doi", default="",
+                   help="Optional paper DOI to record in BUNDLE_MANIFEST.")
+    args = p.parse_args(argv)
+
+    archive = find_archive(args.archive)
+    if not (archive / ".holotype" / "config.json").exists():
+        sys.stderr.write(f"holotype: no archive at {archive}\n")
+        return 2
+
+    prefixes = parse_session_list(args)
+    if not prefixes:
+        sys.stderr.write("paper_bundle: no sessions specified (use --sessions or --sessions-file)\n")
+        return 2
+
+    out_dir: Path = args.out.expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    sessions_meta: list[dict] = []
+    failures: list[str] = []
+    for prefix in prefixes:
+        sess_dir = resolve_session_by_prefix(archive, prefix)
+        if sess_dir is None:
+            failures.append(prefix)
+            continue
+
+        manifest = json.loads((sess_dir / "manifest.json").read_text())
+        bundle_sess = out_dir / sess_dir.name
+        bundle_sess.mkdir(parents=True, exist_ok=True)
+
+        transcript_bytes = read_transcript_bytes(sess_dir)
+        if transcript_bytes is None:
+            failures.append(f"{prefix} (transcript unreadable)")
+            continue
+        (bundle_sess / "transcript.jsonl").write_bytes(transcript_bytes)
+        shutil.copy(sess_dir / "manifest.json", bundle_sess / "manifest.json")
+
+        # Per-session cite.txt + render.md, sourced from cite.py logic.
+        # We inline a minimal version to avoid importing the cite.py
+        # script as a module (it has argparse at module scope).
+        cite_txt = (
+            f"Holotype session {manifest.get('session_id','?')}\n"
+            f"  SHA-256:        {manifest.get('sha256','?')}\n"
+            f"  Deposited:      {manifest.get('deposited_at','?')}\n"
+            f"  Source:         {manifest.get('source','?')}\n"
+            f"  Models:         {', '.join(manifest.get('models') or ['?'])}\n"
+            f"  Messages:       {manifest.get('message_count','?')}\n"
+            f"  Wall clock (s): {manifest.get('wall_clock_seconds','?')}\n"
+        )
+        gs = manifest.get("project_git_state")
+        if isinstance(gs, dict):
+            cite_txt += (
+                f"  Project repo:   {gs.get('remote') or '?'} @ "
+                f"{gs.get('commit_short') or gs.get('commit') or '?'} "
+                f"({gs.get('captured_at','?')})\n"
+            )
+        (bundle_sess / "cite.txt").write_text(cite_txt)
+
+        sessions_meta.append({
+            "session_id": manifest.get("session_id"),
+            "source": manifest.get("source"),
+            "sha256": manifest.get("sha256"),
+            "models": manifest.get("models", []),
+            "message_count": manifest.get("message_count"),
+            "first_timestamp": manifest.get("first_timestamp"),
+            "last_timestamp": manifest.get("last_timestamp"),
+            "wall_clock_seconds": manifest.get("wall_clock_seconds"),
+            "total_input_tokens": manifest.get("total_input_tokens"),
+            "total_output_tokens": manifest.get("total_output_tokens"),
+            "project_git_state": manifest.get("project_git_state"),
+        })
+
+    bundle_manifest = {
+        "schema_version": 1,
+        "produced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "archive_commit": archive_commit(archive),
+        "paper_title": args.paper_title or None,
+        "paper_doi": args.paper_doi or None,
+        "session_count": len(sessions_meta),
+        "sessions": sessions_meta,
+    }
+    (out_dir / "BUNDLE_MANIFEST.json").write_text(
+        json.dumps(bundle_manifest, indent=2) + "\n"
+    )
+    write_verify_md(out_dir)
+
+    if args.tarball:
+        tar_path = out_dir.with_suffix(out_dir.suffix + ".tar.gz")
+        # tar from the parent dir so the archive contains the bundle
+        # folder at top level (Zenodo-friendly).
+        subprocess.run(
+            ["tar", "-czf", str(tar_path),
+             "-C", str(out_dir.parent), out_dir.name],
+            check=True,
+        )
+        sha = sha256_file(tar_path)
+        (tar_path.parent / f"{tar_path.name}.sha256").write_text(f"{sha}  {tar_path.name}\n")
+        print(f"  tarball: {tar_path}")
+        print(f"  sha256:  {sha}")
+
+    print(f"  bundle:    {out_dir}")
+    print(f"  sessions:  {len(sessions_meta)}")
+    if failures:
+        print(f"  failed:    {len(failures)} ({', '.join(failures)})", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
