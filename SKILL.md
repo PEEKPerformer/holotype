@@ -63,17 +63,27 @@ Then offer:
 
 **Step 4 — If a remote was chosen, get the URL.** For GitHub, also ask for org/account and repo name and offer to `gh repo create --private` it on the fly (but only if the user says "yes" — never silently).
 
+**Step 4b — Auto-push policy (only if a remote was chosen).** Ask:
+
+> "Auto-push to `<url>` after every ingest? (Y/n — Recommended)
+>
+> Recommended (Y) for most users: the archive stays in sync with the remote without you having to remember to push. Privacy decision already made when you picked the remote — transcripts will be pushed there.
+>
+> Decline (n) if your transcripts may contain pre-publication embargo data, IP-sensitive lab measurements, or other material you want to gate on per-push review. With auto-push off, you'd run `git -C <archive> push` manually when you're ready to publish."
+
+Default is yes. The privacy warning was already shown at Step 3; this step is about *when* the user wants the push to happen, not *whether* the remote can see the data.
+
 **Step 5 — Confirm before writing.** Show a summary:
-> "I'll create the archive at `<path>` as a new git repo. Compression: `<auto|none|zstd>` (resolves to `<zstd|none>` on this system). GPG-signed commits: `<yes|no>`. Remote: `<url-or-none>`. Push policy: manual (never automatic). Proceed?"
+> "I'll create the archive at `<path>` as a new git repo. Compression: `<auto|none|zstd>` (resolves to `<zstd|none>` on this system). GPG-signed commits: `<yes|no>`. Remote: `<url-or-none>`. Auto-push: `<yes|no>`. Proceed?"
 
 For high-stakes archives (anything destined for a paper's Zenodo deposit), additionally offer GPG-signed commits — adds a `--sign-commits` flag to init that turns on `config.deposit.sign_commits=true`, after which every deposit commit is GPG-signed. Requires `git config user.signingkey` to be set; if it's empty, init still proceeds but warns that the first ingest will fail until the user wires GPG up.
 
 **Step 6 — Run init.** Call:
 ```bash
-python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none> --compression <auto|none|zstd> [--sign-commits]
+python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none> --compression <auto|none|zstd> [--sign-commits] [--auto-push|--no-auto-push]
 ```
 
-The script writes `<archive>/.holotype/config.json` (including the *resolved* compression mode — `auto` is replaced with the concrete choice), drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive. If `--compression zstd` is forced but zstd isn't on PATH, init exits 2; `--compression auto` falls back to plain JSONL with a notice.
+The script writes `<archive>/.holotype/config.json` (including the *resolved* compression mode — `auto` is replaced with the concrete choice — and the resolved auto-push flag), drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive. If `--compression zstd` is forced but zstd isn't on PATH, init exits 2; `--compression auto` falls back to plain JSONL with a notice. Auto-push defaults to yes when `--remote-url` is set, no otherwise.
 
 **Step 7 — Host-CLI retention check.** Holotype's forensic-completeness promise has a hole if the host CLI prunes session transcripts before holotype can deposit them. Claude Code's default `cleanupPeriodDays` is 30; we want effectively-never. Run:
 
@@ -155,7 +165,7 @@ Read these before any operation:
 
 1. **Never hand-edit a deposited transcript.** The archive's git tree is append-only from outside. If a session JSONL grows in the source (a session keeps running and adds more turns), the next `ingest.py` will detect the change and record it as an `update` commit — that is the only mechanism by which a deposited transcript ever changes on disk.
 2. **Never filter content.** Tool calls, tool results, thinking blocks, system reminders, hook outputs — every byte is part of the scientific record. The skill's whole point is forensic completeness.
-3. **Never auto-push to a remote.** Even if a remote is configured, push only when the user explicitly says so. Confirm before each push, summarizing what will be uploaded (count of new sessions, total bytes).
+3. **Push policy is set at archive-init time, not at ingest time.** When `config.deposit.auto_push` is true (the default when a remote was configured at init), ingest pushes after a successful cycle — that's what the user opted into at the wizard's Step 4b. When auto-push is false, only push when the user explicitly asks. Never *re-configure* push policy mid-stream without going back through the wizard; the privacy decision lives at init.
 4. **The archive is git-tracked.** Every deposit is a commit with a deterministic message of the form `deposit: <project>/<session-id>` or `update: <project>/<session-id>`. Both the JSONL and its manifest live under `sessions/<project-dir>/<session-id>/`.
 5. **The SQLite index at `<archive>/.holotype/index.sqlite` is derived data.** It speeds up search. It is NOT a source of truth. It can be deleted and rebuilt with `scripts/reindex.py` (planned) at any time.
 6. **Live-file safety is built in.** `ingest.py` skips JSONLs modified in the last 2 seconds and re-checks mtime after reading. You should not need to add additional checks.

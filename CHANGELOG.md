@@ -21,6 +21,7 @@ First public release. The substrate that makes Digital Discovery's LLM-DAS requi
 - **Optional zstd compression at deposit** — `--compression auto` (default; uses zstd if the binary is on PATH, else plain JSONL) or `--compression {zstd|none}`. Locked for the life of the archive.
 - **Two-track verification** — manifests record both the canonical uncompressed SHA-256 (`sha256`) and the on-disk compressed SHA-256 (`sha256_compressed`). Reviewers verify whichever they have tools for.
 - **Optional GPG-signed deposit commits** via `init.py --sign-commits`. Off by default.
+- **Auto-push after every ingest** when a remote is configured at init — `config.deposit.auto_push` defaults to `true` when `remote.url` is set, `false` for local-only archives. Privacy decision happens at remote-configuration time (wizard Step 3's explicit warning); auto-push honors that consent without forcing per-cycle re-confirmation. Pre-publication / IP-sensitive workflows can opt out via `--no-auto-push`. Push failures emit a warning but never fail the ingest — local deposits are committed first.
 - **Live-file safety** — `ingest.py` skips JSONLs modified in the last 2 seconds and re-checks mtime after reading. Atomic writes throughout.
 - **Concurrency safety** — exclusive `flock` at `<archive>/.holotype/.lock`. Concurrent ingests exit cleanly.
 

@@ -384,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
     if compression == "none":
         compression = None
     sign_commits = bool(deposit_cfg.get("sign_commits"))
+    auto_push = bool(deposit_cfg.get("auto_push"))
+    remote_url = ((config.get("remote") or {}).get("url") or "").strip()
     candidates = discover_candidates(config, args.source, args.source_name)
 
     if not candidates and not args.dry_run:
@@ -425,6 +427,26 @@ def main(argv: list[str] | None = None) -> int:
             )
             if committed and not args.quiet:
                 print("\n".join(committed))
+
+        # Auto-push if configured. Runs at end of cycle (one push per
+        # ingest, not per session) so a single network round-trip
+        # covers everything. Push failure does NOT fail the ingest —
+        # local deposits are already committed and a future ingest or
+        # manual push will retry.
+        if any_changes and auto_push and remote_url and not args.dry_run:
+            if not args.quiet:
+                print(f"  pushing to {remote_url}...")
+            push = run_git(archive, "push", "origin", "HEAD")
+            if push.returncode == 0:
+                if not args.quiet:
+                    print("  push OK")
+            else:
+                sys.stderr.write(
+                    f"holotype: auto-push to {remote_url} failed (deposits are "
+                    f"safe locally; retry manually with `git -C {archive} push`).\n"
+                )
+                if push.stderr:
+                    sys.stderr.write(push.stderr)
 
         return 0 if any_changes else 1
     finally:

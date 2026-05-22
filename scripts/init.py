@@ -80,6 +80,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "unsigned commits in an archive the user thinks is signed."
         ),
     )
+    push_group = p.add_mutually_exclusive_group()
+    push_group.add_argument(
+        "--auto-push",
+        dest="auto_push",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "Push to the configured remote after every successful ingest. "
+            "Default when --remote-url is set. Privacy decision happens here "
+            "(transcripts WILL be pushed to the remote you configured) — "
+            "pair with --remote-url accordingly."
+        ),
+    )
+    push_group.add_argument(
+        "--no-auto-push",
+        dest="auto_push",
+        action="store_const",
+        const=False,
+        help=(
+            "Keep push manual even when a remote is configured. Required when "
+            "transcripts may contain pre-publication embargo data or other "
+            "material the user wants to gate on per-push review."
+        ),
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -270,6 +295,7 @@ def write_config(
     remote_kind: str,
     compression: str,
     sign_commits: bool,
+    auto_push: bool,
 ) -> None:
     config = {
         "archive_format_version": ARCHIVE_FORMAT_VERSION,
@@ -281,12 +307,21 @@ def write_config(
         "remote": {
             "url": remote_url,
             "kind": remote_kind,
-            "push_policy": "manual",
+            # push_policy is "auto" when ingest pushes after every cycle,
+            # "manual" when the user prefers per-push review. The actual
+            # gate is deposit.auto_push below; this string is informational.
+            "push_policy": "auto" if auto_push else "manual",
         },
         "deposit": {
             "commit_strategy": "per-session",
             "sign_commits": sign_commits,
             "compression": compression,
+            # When true and a remote is configured, ingest.py runs
+            # `git push` after a successful ingest. Privacy decision was
+            # made at remote-configuration time (the wizard's explicit
+            # warning that transcripts will be pushed); auto_push just
+            # honors that decision without forcing the user to remember.
+            "auto_push": auto_push,
         },
         "verification": {
             "hash_algorithm": "sha256",
@@ -401,7 +436,27 @@ def init_archive(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-    write_config(archive, args.remote_url, args.remote_kind, args.compression, args.sign_commits)
+    # Resolve auto_push default: enabled when a remote is configured (the
+    # user already consented to "transcripts on this remote" at wizard
+    # step 3), disabled for local-only archives (nothing to push to).
+    if args.auto_push is None:
+        args.auto_push = bool(args.remote_url)
+    if args.auto_push and not args.remote_url:
+        print(
+            "init: --auto-push requested but --remote-url is empty. "
+            "Cannot auto-push without a remote configured.",
+            file=sys.stderr,
+        )
+        return 2
+
+    write_config(
+        archive,
+        args.remote_url,
+        args.remote_kind,
+        args.compression,
+        args.sign_commits,
+        args.auto_push,
+    )
     write_archive_readme(archive)
     write_verify_md(archive)
     write_archive_gitignore(archive)
@@ -444,6 +499,7 @@ def init_archive(args: argparse.Namespace) -> int:
     print(f"  remote kind: {args.remote_kind}")
     print(f"  compression: {args.compression}")
     print(f"  sign commits: {args.sign_commits}")
+    print(f"  auto-push:   {args.auto_push}")
     print()
     print("Next steps:")
     print("  - To deposit sessions:  python scripts/ingest.py")

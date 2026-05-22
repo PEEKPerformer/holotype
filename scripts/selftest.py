@@ -501,6 +501,51 @@ def main(argv: list[str] | None = None) -> int:
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, f"three-source verify failed: {result.stderr}")
 
+        step("auto-push: init with a local bare-repo remote and confirm ingest pushes")
+        bare_remote = tmp / "bare-remote.git"
+        subprocess.run(["git", "init", "--bare", str(bare_remote)], check=True,
+                       capture_output=True)
+        ap_archive = tmp / "archive-autopush"
+        result = run_script(
+            REPO_ROOT / "scripts" / "init.py",
+            "--path", str(ap_archive),
+            "--remote-url", f"file://{bare_remote}",
+            "--remote-kind", "other",
+            "--compression", "none",
+            "--auto-push",
+        )
+        expect(result.returncode == 0, f"init --auto-push failed: {result.stderr}")
+        ap_cfg = json.loads((ap_archive / ".holotype" / "config.json").read_text())
+        expect(ap_cfg["deposit"]["auto_push"] is True,
+               f"config.deposit.auto_push should be true: {ap_cfg['deposit']}")
+
+        ap_src, _ = materialize_antigravity_source(tmp / "ap-source-parent")
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(ap_archive),
+            "--source", str(ap_src),
+            "--source-name", "antigravity",
+        )
+        expect(result.returncode == 0, f"auto-push ingest failed: {result.stderr}\n{result.stdout}")
+        expect("pushing to" in result.stdout, f"auto-push log line missing:\n{result.stdout}")
+        expect("push OK" in result.stdout, f"auto-push didn't report success:\n{result.stdout}")
+
+        # The bare remote should now have at least one ref under refs/heads/.
+        remote_refs = list((bare_remote / "refs" / "heads").iterdir()) if (bare_remote / "refs" / "heads").exists() else []
+        # Newer git stores refs in packed-refs by default for bare repos.
+        packed_refs = (bare_remote / "packed-refs")
+        has_ref = len(remote_refs) > 0 or packed_refs.exists()
+        expect(has_ref, f"bare remote has no refs after auto-push (refs={remote_refs}, packed={packed_refs.exists()})")
+
+        # Verify the bare remote actually contains the deposit commit by
+        # cloning it and checking the manifest is there.
+        clone_dir = tmp / "remote-clone"
+        subprocess.run(["git", "clone", "--quiet", f"file://{bare_remote}", str(clone_dir)],
+                       check=True, capture_output=True)
+        cloned_manifests = list((clone_dir / "sessions").rglob("manifest.json"))
+        expect(len(cloned_manifests) >= 1,
+               f"auto-push didn't deliver any session to the remote (cloned manifests: {len(cloned_manifests)})")
+
         step("paper_bundle.py packages multiple sessions with a master manifest")
         # Pull a Claude Code session + the Codex one + the Antigravity one.
         bundle_out = tmp / "paper-bundle"

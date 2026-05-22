@@ -30,6 +30,7 @@ Most agent-CLI archival tools optimize for search, which means they filter "nois
 - **`paper_bundle.py`** — packages many sessions into one Zenodo-ready deposit with a master `BUNDLE_MANIFEST.json` and optional tarball + SHA-256 sidecar.
 - **Two-track verification** — reviewer with `zstd` installed verifies the uncompressed canonical SHA-256; reviewer without `zstd` verifies the on-disk compressed SHA-256. Both succeed for valid deposits.
 - **Optional GPG-signed deposit commits** — opt-in at init via `--sign-commits` for high-stakes archives.
+- **Auto-push to the configured remote** — default ON when a remote URL is set at init (the privacy decision happens then, with an explicit warning). Pre-publication / IP-sensitive workflows can opt out via `--no-auto-push`. Local-only archives have nothing to push and auto-push is forced off.
 - **LLM-adaptable extension** — when invoked from an unrecognized host CLI, the skill instructs the LLM to read `docs/ADDING_A_SOURCE.md` and write a new Source class against the documented contract, rather than silently dropping that CLI's sessions.
 
 ## Architecture
