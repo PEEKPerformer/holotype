@@ -8,6 +8,23 @@ disable-model-invocation: true
 
 You are operating on the **holotype** archive — a content-addressable, hash-chained git repository of Claude Code session transcripts. The archive is the canonical scientific record. Treat it as immutable.
 
+## Before any operation — check for updates
+
+The user invoked the skill, which is the only signal we accept for outbound network. Run this once at the start of any holotype operation (setup, ingest, search, cite, verify, paper-bundle — anything):
+
+```bash
+python scripts/update_check.py --json
+```
+
+The script hits the GitHub releases API, caches the result for 24 hours under `~/.cache/holotype/`, exits 0 on network failure, and emits one of:
+
+- `{"status": "current", ...}` — nothing to say; proceed.
+- `{"status": "update-available", "local": "X", "latest": "Y", ...}` — tell the user **once** at the top of the response: *"A newer holotype is available (X → Y). To update: `git -C <repo-root> pull`. Continuing with X."* Then proceed with whatever they asked for. Do not block on the update; do not run the pull on their behalf without explicit confirmation.
+- `{"status": "ahead", ...}` — user is on a dev checkout ahead of the latest tag; ignore silently.
+- `{"status": "unreachable", ...}` — offline or GitHub API hiccup; ignore silently.
+
+Because of the 24h cache, this is effectively free across an active session.
+
 ## Step 0 — First-time setup (always do this first if no archive exists)
 
 Before depositing anything, the user must consciously choose **where the archive lives** and **whether it has a remote**. Transcripts contain everything Claude saw — file paths, the contents of files that were read, command output that may have included credentials, internal codebase details. Pushing to any remote is a privacy and security decision that must not be a silent default.
@@ -422,6 +439,7 @@ Read these before any operation:
 | Bundle many sessions for a paper's Zenodo deposit | `python scripts/paper_bundle.py --sessions a,b,c --out <dir> [--tarball]` |
 | Recover when first push fails with "pack exceeds 2 GiB" | `python scripts/repush_chunked.py` |
 | Pause / resume the macOS background tick (for repo surgery) | `python scripts/install-launchd.py --pause` then `--resume` |
+| Check whether a newer holotype release is available | `python scripts/update_check.py [--json]` |
 | Verify the archive's hash chain | `python scripts/verify.py` |
 | Verify a single session | `python scripts/verify.py <session-id>` |
 | Drop and rebuild the SQLite index from the canonical archive | `python scripts/reindex.py` |

@@ -1066,6 +1066,24 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             ClaudeCodeSource.default_source_paths = saved_paths
 
+        step("update_check.py runs offline and produces parseable JSON")
+        result = run_script(
+            REPO_ROOT / "scripts" / "update_check.py",
+            "--json",
+            "--no-cache",
+            env_extra={
+                "no_proxy": "",
+                "NO_PROXY": "",
+                "https_proxy": "http://127.0.0.1:1",
+                "HTTPS_PROXY": "http://127.0.0.1:1",
+            },
+        )
+        expect(result.returncode == 0, f"update_check returncode={result.returncode}: {result.stderr}")
+        payload = json.loads(result.stdout)
+        expect(payload.get("status") in {"current", "update-available", "ahead", "unreachable"},
+               f"update_check unexpected status: {payload}")
+        expect("local" in payload, f"update_check missing local version: {payload}")
+
         print("\nALL CHECKS PASSED")
         success = True
         return 0

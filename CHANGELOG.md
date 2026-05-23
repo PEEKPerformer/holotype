@@ -2,6 +2,16 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] — 2026-05-23
+
+### Added
+
+- **`scripts/update_check.py`** — stdlib-only, user-invoked release-check utility. Hits `api.github.com/repos/PEEKPerformer/holotype/releases/latest`, compares to `__version__`, prints either a human-readable line or `--json` for machine consumption. Result is cached at `~/.cache/holotype/update_check.json` for 24h (cache miss costs one anonymous request inside GitHub's 60/hr/IP unauthenticated limit). Always exits 0 so a network failure cannot break the workflow that called it. `SKILL.md` now instructs the LLM to run `--json` once at the start of any holotype operation and surface "update available" notices to the user without blocking or pulling on their behalf.
+
+  This stays within the "no silent network behavior" principle: the user invoking the skill is the consent signal, and launchd never calls this script. Manual updates remain `git -C <repo-root> pull`; PyPI is deliberately deferred until there's demonstrated demand.
+
+---
+
 ## [2.0.3] — 2026-05-23
 
 ### Fixed
