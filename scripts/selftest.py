@@ -909,6 +909,23 @@ def main(argv: list[str] | None = None) -> int:
                    f"bundle transcript hash mismatch for {sid}: {recomputed} != {sess['sha256']}")
         expect((bundle_out / "VERIFY.md").exists(), "paper bundle missing VERIFY.md")
 
+        step("paper_bundle ships an index.html and per-session view.html (no scripts)")
+        index_html = bundle_out / "index.html"
+        expect(index_html.exists(), "bundle missing index.html")
+        index_text = index_html.read_text()
+        expect("<script" not in index_text.lower(), "index.html contains a <script> tag")
+        expect("Content-Security-Policy" in index_text, "index.html missing CSP meta")
+        for sess in bm["sessions"]:
+            view = bundle_out / sess["session_id"] / "view.html"
+            expect(view.exists(), f"session {sess['session_id']} missing view.html")
+            text = view.read_text()
+            expect("<script" not in text.lower(),
+                   f"view.html for {sess['session_id']} contains a <script> tag")
+            expect("Content-Security-Policy" in text,
+                   f"view.html for {sess['session_id']} missing CSP meta")
+            expect(sess["session_id"] in text,
+                   f"view.html for {sess['session_id']} missing its session id in body")
+
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at
         # the test source, then call collect() in-process.

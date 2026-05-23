@@ -6,9 +6,10 @@ papers cite many. This script accepts a list of session ID prefixes
 and produces a directory containing:
 
   - one subdir per session with plain ``transcript.jsonl`` +
-    ``manifest.json`` + ``cite.txt`` + ``render.md``
+    ``manifest.json`` + ``cite.txt`` + ``view.html``
   - a top-level ``BUNDLE_MANIFEST.json`` listing every session with
     its canonical SHA-256, model IDs, message count, etc.
+  - a top-level ``index.html`` linking to each session's ``view.html``
   - a top-level ``VERIFY.md`` describing how a reviewer hashes each
     transcript and compares against the BUNDLE_MANIFEST
   - optionally, a ``<bundle>.tar.gz`` and ``<bundle>.tar.gz.sha256``
@@ -38,6 +39,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from holotype.archive import resolve_session_by_prefix
 from holotype.compression import read_transcript_bytes
+from holotype.viewer import render_index, render_session
 
 
 def find_archive(explicit: Path | None) -> Path:
@@ -117,7 +119,9 @@ def write_verify_md(out_dir: Path) -> None:
               token totals, and (when available) the project repo's git
               state at session-start
             - ``cite.txt`` — one-screen citation block
-            - ``render.md`` — human-readable Markdown rendering for reviewers
+            - ``view.html`` — self-contained HTML rendering of the
+              transcript for browser-based review (regenerated from
+              the JSONL; not part of the hash chain)
 
             ## What this bundle does NOT include
 
@@ -205,6 +209,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         (bundle_sess / "cite.txt").write_text(cite_txt)
 
+        try:
+            render_session(manifest, bundle_sess / "transcript.jsonl", bundle_sess / "view.html")
+        except Exception as e:  # rendering is best-effort; never fail the bundle
+            sys.stderr.write(f"  warning: view.html render failed for {prefix}: {e}\n")
+
         sessions_meta.append({
             "session_id": manifest.get("session_id"),
             "source": manifest.get("source"),
@@ -232,6 +241,10 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(bundle_manifest, indent=2) + "\n"
     )
     write_verify_md(out_dir)
+    try:
+        render_index(out_dir, bundle_manifest, out_dir / "index.html")
+    except Exception as e:
+        sys.stderr.write(f"  warning: index.html render failed: {e}\n")
 
     if args.tarball:
         tar_path = out_dir.with_suffix(out_dir.suffix + ".tar.gz")
