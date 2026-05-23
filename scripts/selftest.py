@@ -926,6 +926,30 @@ def main(argv: list[str] | None = None) -> int:
             expect(sess["session_id"] in text,
                    f"view.html for {sess['session_id']} missing its session id in body")
 
+        step("browse.py builds an in-memory index and per-session HTML")
+        import importlib.util as _iu_browse
+        _br_spec = _iu_browse.spec_from_file_location(
+            "_ht_browse_for_test", str(REPO_ROOT / "scripts" / "browse.py")
+        )
+        br_mod = _iu_browse.module_from_spec(_br_spec)
+        _br_spec.loader.exec_module(br_mod)
+        br_sessions = br_mod.collect_sessions(archive)
+        expect(len(br_sessions) >= 3,
+               f"browse collect_sessions saw too few: {len(br_sessions)}")
+        index_bytes = br_mod.render_index_html(archive, br_sessions)
+        expect(b"<script" not in index_bytes.lower(),
+               "browse index contains a <script> tag")
+        expect(b"Content-Security-Policy" in index_bytes,
+               "browse index missing CSP meta")
+        # Each card's href must be rewritten to the /session/<sid> server route.
+        first_sid = next(iter(br_sessions))
+        expect(f'/session/{first_sid}'.encode() in index_bytes,
+               f"browse index missing server-route href for {first_sid}")
+        sess_dir, sess_manifest = br_sessions[first_sid]
+        sess_bytes = br_mod.render_session_html(sess_dir, sess_manifest)
+        expect(sess_bytes is not None and b"<script" not in sess_bytes.lower(),
+               "browse session render contains a <script> tag or is None")
+
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at
         # the test source, then call collect() in-process.

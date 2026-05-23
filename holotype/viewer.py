@@ -505,7 +505,7 @@ _DOC_CLOSE = "</main>\n</body>\n</html>\n"
 # ----- Block rendering -----------------------------------------------------
 
 
-def _render_block(block: dict) -> str:
+def _render_block(block: dict, include_raw: bool = True) -> str:
     kind = block.get("kind", "unknown")
     role = block.get("role")
     ts = _fmt_ts(block.get("timestamp"))
@@ -581,12 +581,13 @@ def _render_block(block: dict) -> str:
     elif kind == "unknown":
         parts.append('<p class="text">(record shape not recognized — see raw JSON below)</p>')
 
-    raw = block.get("raw")
-    if raw is not None:
-        parts.append(
-            "<details><summary>raw JSON</summary>"
-            f'<pre>{_escape(_pretty_json(raw))}</pre></details>'
-        )
+    if include_raw:
+        raw = block.get("raw")
+        if raw is not None:
+            parts.append(
+                "<details><summary>raw JSON</summary>"
+                f'<pre>{_escape(_pretty_json(raw))}</pre></details>'
+            )
 
     parts.append("</div>")
     return "".join(parts)
@@ -607,8 +608,16 @@ def _read_transcript_records(transcript_path: Path) -> Iterator[dict]:
                 yield {"_holotype_unparseable": line}
 
 
-def render_session(manifest: dict, transcript_path: Path, out_path: Path) -> None:
-    """Write ``view.html`` rendering ``transcript_path`` for one session."""
+def render_session(manifest: dict, transcript_path: Path, out_path: Path,
+                   include_raw: bool = True) -> None:
+    """Write ``view.html`` rendering ``transcript_path`` for one session.
+
+    ``include_raw`` controls whether each block carries a ``<details>`` with
+    its verbatim JSONL record. Default True (the paper-bundle case, where
+    reviewers need to verify the rendering is faithful). Set False for the
+    casual-browse case where output size matters more than per-block audit
+    (the canonical JSONL is right next to the HTML either way).
+    """
     source = manifest.get("source") or "unknown"
     session_id = manifest.get("session_id") or "?"
     sha = manifest.get("sha256") or "?"
@@ -665,7 +674,7 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path) -> Non
             continue
         for block in _normalize_record(source, record):
             seen_any = True
-            parts.append(_render_block(block))
+            parts.append(_render_block(block, include_raw=include_raw))
 
     if not seen_any:
         parts.append('<p class="banner">(transcript was empty)</p>')

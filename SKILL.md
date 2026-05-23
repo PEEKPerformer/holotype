@@ -39,9 +39,19 @@ Also name BOTH sides of any tradeoff you do present. The previous wizard loudly 
 
 ### Wizard
 
-**Open with a plain-English orientation** (do not start running scripts yet — the user invoked `/holotype` and has no idea what it is):
+**Open with a plain-English orientation** (do not start running scripts yet — the user invoked `/holotype` and has no idea what it is). Lead with the universal pain (lost work), not the academic value (citing). Most users want to not lose their chats; the small slice who will ever cite a transcript in a paper get that benefit for free:
 
-> "Holotype keeps a copy of every Claude Code (and Codex / Antigravity) conversation in a folder on this Mac, so they're never lost when the host app clears them. The copies are hash-stamped, so if you ever want to cite a conversation in a paper, you can prove what it contained on what date. I'll set it up now — just two questions, then I'll do everything else and tell you what I did."
+> "Heads up — Claude Code automatically deletes every conversation after 30 days. If you've ever tried to find a chat from last month and couldn't, that's why. Codex does the same thing.
+>
+> Holotype saves a copy of every conversation to a folder on this Mac, so this stops happening. Each copy gets a tamper-proof timestamp — useful if you ever want to cite a chat in a paper, but mostly you'll just appreciate that everything is still there when you need it.
+>
+> Want to set it up? Two questions, takes a minute."
+
+**Step 0a — Auto-mode preflight.** Claude Code's auto-mode classifier evaluates each Bash call independently and will mid-flow block legitimate setup commands (modifying `~/.claude/settings.json`, installing the launchd plist) even after the user verbally said yes. Detect auto-mode (Claude Code displays "auto mode on" in the status bar) and ask once:
+
+> "Quick — looks like auto-mode is on. Setup modifies a few system files and the classifier will likely block those mid-flow even after you say yes here. Easier if you toggle auto-mode off for the next 60 seconds (Shift+Tab cycles modes), then back on after setup. Want to do that?"
+
+If they say yes, wait for them to confirm. If they say no, proceed but be ready to fall back to the `!`-prefix shell-escape workaround at each blocked step (see Step A for how to explain `!` to non-terminal users).
 
 **Step A — Calibration (one multi-select).** This is *not* a setup decision. The answer changes how the rest of the conversation is phrased — it has real impact, which is why it earns its place. Ask:
 
@@ -127,22 +137,29 @@ Stream output live — do **not** pipe through `| tail -50`. A non-programmer st
 
 ```
 ✓ Archive: ~/Documents/holotype-archive (zstd-compressed)
-✓ GPG signing on (key: ~/.gnupg, no passphrase)
+✓ GPG signing on (key: ~/.gnupg, no passphrase) — useful for paper citations
 ✓ Retention bumped to 36500 days (revert in ~/.claude/settings.json)
 ✓ Launchd job io.holotype.ingest, 30-min interval (uninstall: python scripts/install-launchd.py --uninstall)
 ✓ Pushed to <remote-url>, encrypted at rest (git-crypt key backed up to <location>)
 ✓ Ingested 95 existing sessions (55 Claude Code + 40 Codex)
+
+Browse the archive in your browser:  python scripts/browse.py
 ```
 
-**For users who checked nothing** — plain sentences with "ask Claude" undos:
+**For users who checked nothing** — plain sentences with "ask Claude" undos. Save the citation mention for last and make it optional, not a headline; most users don't think of chats as paper-citable:
 
 > Done — here's what I set up on your Mac:
 > - Your Claude Code conversations are being saved to `~/Documents/holotype-archive`. They get compressed to save space.
-> - The saved copies have a tamper-proof signature so you can prove you wrote them if you cite them in a paper later. (To turn that off, ask Claude to "turn off holotype signing.")
-> - I told Claude Code to stop auto-deleting old conversations. (To turn that back on, ask Claude to "restore Claude Code's default retention.")
-> - I set up an automatic backup that runs every 30 minutes in the background, so new conversations get saved without you having to remember. (To turn that off, ask Claude to "turn off holotype's background backup.")
-> - 95 existing conversations were saved into the archive just now.
+> - I told Claude Code to stop auto-deleting old conversations.
+> - I set up an automatic backup that runs every 30 minutes in the background, so new conversations get saved without you having to remember.
 > - I also set up an encrypted backup to a private GitHub repo (`<url>`) and saved the unscramble key to `<location>`. The local copy on your Mac is always readable; the GitHub copy needs the key.
+> - 95 existing conversations were saved into the archive just now.
+>
+> **To browse what's saved**, just say "show me my holotype archive" — I'll open it in your browser.
+>
+> Side note: each saved copy has a tamper-proof signature, so you can prove you wrote it if you ever want to cite the chat in a paper. Ask if you ever need details. Otherwise it's invisible. To turn things off later, just ask: "turn off holotype's background backup," "restore Claude Code's default retention," etc.
+
+When the user later says "show me my holotype archive" (or any variant — "browse the saved chats," "open my archive," etc.), run `python scripts/browse.py` as a backgrounded task and surface the printed URL to the user. The script starts a localhost-only HTTP server that renders the index and each session on demand — nothing is written to disk. Remind the user to press Ctrl-C in the terminal (or send a "stop browsing" message) when they're done.
 
 Hand off cleanly. Don't ask any further questions unless the user does.
 
@@ -204,6 +221,7 @@ Read these before any operation:
 | Install macOS scheduled-backup job (auto, at setup) | `python scripts/install-launchd.py --archive <p>` |
 | Deposit new sessions (preferred — from the rsync backup) | `python scripts/ingest.py --source ~/Documents/Claude-Backups` |
 | Deposit directly from live Claude Code state | `python scripts/ingest.py --source ~/.claude/projects` |
+| Browse the archive in a browser (localhost server, no disk cache) | `python scripts/browse.py` |
 | Find sessions matching text (FTS5) | `python scripts/search.py "<query>"` |
 | Just the citation string for one session | `python scripts/cite.py <session-id> --citation-only` |
 | Print the manifest for one session | `python scripts/cite.py <session-id> --manifest-only` |
