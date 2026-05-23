@@ -35,7 +35,8 @@ LLM-driven sessions that drive instruments, perform autonomous analysis, or exec
 - **Optional `git-crypt` encryption** before push, for backup remotes that shouldn't see transcript content. Manifests stay plaintext; the data-loss risk of key loss is surfaced loudly at init.
 - **Optional GPG-signed deposit commits** for tamper-evident provenance.
 - **Reproducibility manifest** capturing project repo git state, wall-clock duration, model IDs, and per-session token totals.
-- **Paper bundles** via `scripts/paper_bundle.py` — extract a curated session subset for Zenodo deposit, with a master `BUNDLE_MANIFEST.json` and tarball + SHA-256 sidecar.
+- **Paper bundles** via `scripts/paper_bundle.py` — extract a curated session subset for Zenodo deposit, with a master `BUNDLE_MANIFEST.json`, per-session self-contained `view.html`, top-level `index.html`, and tarball + SHA-256 sidecar.
+- **In-browser archive viewer** via `scripts/browse.py` — a stdlib HTTP server on localhost that renders the index and each session on demand. Zero disk cache. Lets a non-programmer answer the first real post-setup question ("how do I look at my saved chats?") without touching the CLI.
 - **Parallel ingest pipeline** with auto-chunking and per-chunk push so encrypted multi-GB archives don't trip GitHub's pack-size limit.
 - **Background tick** (macOS launchd, Linux systemd unit template) for catch-up ingests on long-running sessions.
 

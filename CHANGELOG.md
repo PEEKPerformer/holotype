@@ -2,6 +2,40 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-05-23
+
+### Added
+
+- **`holotype/viewer.py`** — self-contained HTML rendering of a deposited transcript. Single file per session, no JS framework, no CDN, strict CSP (`default-src 'none'; img-src data:; script-src 'none'`). Base64 image attachments reconstruct inline as `data:` URIs so a reviewer sees what the agent saw. Per-source normalizers cover Claude Code, Codex, and Antigravity; unrecognized record shapes fall through to a raw-JSON `<details>` block rather than being silently dropped.
+
+- **`scripts/paper_bundle.py` now ships HTML alongside JSONL.** Each bundled session gets a `view.html`; the bundle root gets an `index.html` linking them. The HTML is regenerated from the canonical JSONL and is not part of the hash chain — reviewers can verify rendering faithfulness via the per-block raw-JSON toggle. This is the "read what you're uploading to Zenodo before you upload it" feature.
+
+- **`scripts/browse.py`** — `python scripts/browse.py` (or "ask Claude to show me my holotype archive") starts a stdlib HTTP server bound to `127.0.0.1` on an OS-assigned port and opens the user's default browser. The index lists every archived session; clicking one renders the transcript HTML on the fly. **Zero disk cache** — the canonical archive is the source, HTML is generated per request. Localhost-only by design; the archive contains every conversation written on this machine and must not be exposed to the LAN.
+
+  Earlier prototype pre-rendered all sessions to disk and generated 6 GB of HTML for a 3040-session archive. The on-demand server scales to any archive size and leaves nothing behind when stopped.
+
+### Changed
+
+- **First-time setup wizard collapsed to two real questions** (where the archive lives; back up to GitHub yes/no). Everything else — compression, GPG signing, retention bump, scheduled-backup install, scheduled-backup interval, encryption-when-backup-is-on — silently defaults to the better choice and is surfaced in the post-setup summary with an undo command per item. Driven by cold-start testing with a non-programmer PhD physicist who bounced off the previous wizard's jargon and decision-cost surface.
+
+  Underlying design principle, now part of `SKILL.md`: don't ask a question if one answer is strictly better — asking itself communicates "you have to weigh a tradeoff here" and makes non-experts manage imagined risk by picking smaller / safer-sounding options (even when those are wrong for their actual case). Applies to *parameters* too — exposing a knob counts as asking. The wizard interval and the encryption sub-question both used to be exposed; both are now defaulted.
+
+- **Wizard opening rewritten to lead with universal value, not academic value.** "Claude Code automatically deletes every conversation after 30 days" is the hook. The paper-citation framing is now a parenthetical for the small slice of users who will ever cite a transcript, not the headline.
+
+- **New auto-mode preflight at the top of setup.** Claude Code's auto-mode classifier evaluates each Bash call independently and mid-flow blocks legitimate setup commands even after the user verbally said yes. The wizard now asks once up front whether to toggle auto-mode off for setup.
+
+- **Vocabulary calibration multi-select drives the rest of the conversation.** Users who don't check `git` never see "commit," "remote," "branch." Users who don't check `the terminal` never get a `python scripts/foo.py` to copy-paste — commands run via the host CLI's Bash tool, with a plain-English fallback when the classifier blocks something. Users who don't check `encryption keys` never see "GPG" or "signing" surfaced as a decision.
+
+- **Privacy-cost framing is now symmetric.** The previous wizard loudly named the cost of "push to GitHub" (third party gets your data) while leaving the cost of "local only" unstated, which biased non-experts toward the strictly worse option for anyone with paper-relevant research. The new wizard names BOTH costs: local-only means a single disk failure or a lost laptop wipes every conversation, including any future paper-cited one.
+
+- **README features section** picks up the in-browser viewer.
+
+### Selftest
+
+- New assertions: paper bundle ships `index.html` + per-session `view.html` with strict CSP and no `<script>` tags; `browse.collect_sessions` sees the archive; `browse.render_index_html` and `render_session_html` produce script-free HTML with server-route hrefs.
+
+---
+
 ## [2.0.4] — 2026-05-23
 
 ### Added
