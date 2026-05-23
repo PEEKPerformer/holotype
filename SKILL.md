@@ -27,352 +27,124 @@ Because of the 24h cache, this is effectively free across an active session.
 
 ## Step 0 — First-time setup (always do this first if no archive exists)
 
-Before depositing anything, the user must consciously choose **where the archive lives** and **whether it has a remote**. Transcripts contain everything Claude saw — file paths, the contents of files that were read, command output that may have included credentials, internal codebase details. Pushing to any remote is a privacy and security decision that must not be a silent default.
+### Guiding principle: ask only what has a real cost the user can weigh
 
-**Check** whether `~/.config/holotype/archive-path` exists. If it does, read it to find the archive — setup is already done. If it doesn't, **conduct the wizard one decision at a time**, asking the user via whatever the host CLI provides for structured user input (Claude Code: `AskUserQuestion`; Codex: in-chat prompts; etc.). Do not bypass with `input()` from the script — the wizard belongs in the conversation so the user can revise answers before anything is written. After all answers are collected, invoke `scripts/init.py` with them as flags.
+A wizard question is itself a UX signal — it implies "this needs your judgment because there's a tradeoff." Every spurious question makes a non-expert search for a hidden cost they shouldn't have to think about. So before asking anything, name the concrete cost a reasonable user would weigh in picking the "wrong" answer. If you can't, **don't ask** — pick the better default, do it, and surface the undo in the post-setup summary.
 
-### Wizard steps
+By that test, the entire first-time setup has exactly **two real questions**: where the archive lives, and whether to back it up to a private GitHub repo. Everything else (compression, signing, retention bump, scheduled-backup install, scheduled-backup interval, encryption-when-backup-is-on) is silently defaulted to the better choice.
 
-**Step 1 — Archive location.** Ask with default suggestion `~/Documents/holotype-archive`. Expand `~` to an absolute path before passing to the script.
+Also name BOTH sides of any tradeoff you do present. The previous wizard loudly described the privacy cost of "push to GitHub" while leaving the cost of "local only" unstated, which biased non-experts toward local-only — the strictly worse choice for anyone who might ever cite a session in a paper, because their laptop's disk is a single point of failure for their entire research record.
 
-**Step 2 — Storage projection (consent).** Before any other decisions, the user should see what this archive will cost on disk. Run:
+**Check** whether `~/.config/holotype/archive-path` exists. If it does, read it to find the archive — setup is already done. If it doesn't, run the wizard below: one question at a time, via whatever the host CLI provides for structured user input (Claude Code: `AskUserQuestion`; Codex: in-chat prompts). Do not bypass with `input()` from the script — the wizard belongs in the conversation so the user can revise answers before anything is written.
+
+### Wizard
+
+**Open with a plain-English orientation** (do not start running scripts yet — the user invoked `/holotype` and has no idea what it is):
+
+> "Holotype keeps a copy of every Claude Code (and Codex / Antigravity) conversation in a folder on this Mac, so they're never lost when the host app clears them. The copies are hash-stamped, so if you ever want to cite a conversation in a paper, you can prove what it contained on what date. I'll set it up now — just two questions, then I'll do everything else and tell you what I did."
+
+**Step A — Calibration (one multi-select).** This is *not* a setup decision. The answer changes how the rest of the conversation is phrased — it has real impact, which is why it earns its place. Ask:
+
+> "Quick — which of these have you worked with? (Helps me know how much to explain. Pick any, none is fine.)"
+>
+> - git or GitHub
+> - encryption keys (GPG, SSH)
+> - the terminal / command line
+> - Python
+
+Record the answers. Use them downstream:
+
+- **Did NOT check `git`**: never say "commit," "remote," "branch," "repo," "push." Say "saved copy," "backup location," "send a copy to GitHub."
+- **Did NOT check `encryption keys`**: never say "GPG," "signing," "key pair." If encryption is enabled, describe it as "GitHub stores the backup scrambled so they can't read it." Mention the signing step only in the post-setup summary as a one-liner.
+- **Did NOT check `the terminal`**: never hand them a shell command to copy-paste. Run every command via the host CLI's Bash tool. If the auto-mode classifier blocks something, announce plainly: *"My runtime won't let me modify that file directly — I'll show you what to type yourself in a moment, here's exactly what and why."* Then offer the `!<command>` form (and explain it: "Anything in the chat box starting with `!` runs as a shell command on your Mac, and the output comes back to me.").
+- **Did NOT check `Python`**: never surface `python scripts/foo.py` as the action; describe the action by what it does ("set up the archive," "back up the existing conversations").
+- **Checked all four**: be terse. Skip the explanations. Use the original wizard's vocabulary freely.
+
+**Step B — Archive location (one question with default).** Has a real cost: disk space, where files live, what backs it up. Ask:
+
+> "Where should the archive live on your Mac? (Default: `~/Documents/holotype-archive`)"
+
+Expand `~` to an absolute path. If the user is in `~/UConn_phd/` or another personal research dir, mention that as an alternative default ("...or I can put it next to your research folder at `~/UConn_phd/holotype-archive`"). Do **not** suggest iCloud-synced paths — iCloud's lazy sync corrupts git repos. Do **not** suggest putting it inside an Obsidian vault — Obsidian indexes everything and will choke on the binary `.zst` / `.git` objects.
+
+**Step C — Backup to GitHub? (one question, both sides named).** Has a real cost on either side. Ask, with the cost of *both* choices stated honestly:
+
+> "Want to also save the archive to a private GitHub repo? (Strongly recommended for research work.)
+>
+> - **Yes** — saved on your Mac AND on GitHub. GitHub stores it scrambled so they can't read the conversation contents. I'll set up the scrambling key and save it in two places so it can't be lost. (Requires you to be signed into `gh` — I'll check.)
+> - **No, local only** — saved only on your Mac. If your disk fails or your laptop is lost or stolen, every conversation is gone forever, including any you might want to cite in a future paper. Pick this only if your institution forbids storing pre-publication data on third-party clouds, or if you have your own backup setup that you trust for the `~/Documents` folder."
+
+Default: Yes. The default is what gets picked if the user is unsure; the right default for a research user is the redundant, encrypted backup.
+
+If the user says **No**, skip to Step E.
+
+**Step D — GitHub setup (only if user said Yes in Step C).** No more questions about encryption — encrypted-when-pushed is implied by saying yes to backup, and asking again would re-introduce decision cost. Drive the setup:
+
+1. Check `gh auth status`. If not authed, run `gh auth login` (interactive — user logs in in their browser, output streams back).
+2. Ask the *one* unavoidable question: repo name. Default `holotype-archive`. Confirm org/account.
+3. Run `gh repo create <org>/<name> --private` if the repo doesn't already exist.
+4. Check for `git-crypt` on PATH. If missing, install via the detected package manager (`brew install git-crypt` on macOS; `apt`/`dnf`/`pacman` on Linux). Do this without asking — if the user checked `the terminal`, mention it ("installing git-crypt via brew, takes 5 seconds"); if not, just do it silently and mention it in the summary.
+5. Walk the **key backup conversation** plainly. The key is *not* a scary data-loss bomb here — the canonical archive is the local copy, which stays readable forever; losing the GPG key only makes the *GitHub copy* unreadable. Frame it as belt-and-suspenders: "Let me save a backup of the scrambling key to your password manager / iCloud Keychain / a USB stick / a printable QR code — pick one (or several)." Detect candidates (iCloud Drive, 1Password CLI, USB volumes mounted under `/Volumes/`) and offer the available ones.
+
+**Step E — Run init with everything else defaulted.** Call:
 
 ```bash
-python scripts/usage_estimate.py --json
+python scripts/init.py \
+    --path <abs-path> \
+    --remote-url <url-or-empty> \
+    --remote-kind <github-private|none> \
+    --compression auto \
+    --sign-commits \
+    [--auto-push] \
+    [--encrypt-transcripts --i-understand-key-loss-means-data-loss]
 ```
 
-The script walks each registered Source's default paths (e.g. `~/.claude/projects/`, `~/.codex/sessions/`) and projects forward from current usage. Show the user:
+If signing is on (it always is by default) and no GPG signing key is configured, **generate one silently** via `gpg --batch --gen-key` with an Ed25519 / no-passphrase config block bound to the user's `git config --global user.email`. Wire it into `git config --global user.signingkey` and `git config --global gpg.program`. Don't ask first — there's no real tradeoff (no-passphrase is required for the scheduled-backup job; the key file's protection is the same as `~/.ssh/id_*`, which the OS already protects).
 
-> "Based on N session file(s) across the last D days of host-CLI history (totaling X GB), expect roughly Y MB/day → Z GB/month of uncompressed deposits. With zstd compression on (default when available), JSONL typically gets 30–60% smaller — content-dependent."
+If `zstd` is missing, install via the detected package manager without asking, then fall through to `--compression auto` (resolves to `zstd`).
 
-If `combined.no_data` is true (fresh host-CLI install), say so honestly — projection unavailable, defaults are fine, projection can be re-checked later via `scripts/usage_estimate.py`.
-
-Then decide compression. Default is **`auto`**: zstd if the binary is on PATH, plain JSONL otherwise. Detect by:
+**Step F — Retention bump + scheduled backup (no asking, just doing).** Run silently:
 
 ```bash
-command -v zstd
+python scripts/configure-host-retention.py     # bumps cleanupPeriodDays to 36500 (never prune)
+python scripts/install-launchd.py --archive <path>   # default 30-min interval
 ```
 
-- **zstd is installed**: tell the user "Compression will be enabled (zstd available on your system)." Proceed with `--compression auto` (resolves to `zstd`).
-- **zstd is NOT installed**: offer to install it on their behalf so they get the storage savings. Detect the package manager and propose the exact command:
-  - macOS with Homebrew: `brew install zstd`
-  - Debian/Ubuntu: `sudo apt install zstd`
-  - Fedora: `sudo dnf install zstd`
-  - Arch: `sudo pacman -S zstd`
-  - Windows: `winget install zstd` or `scoop install zstd`
+Neither has a real tradeoff to weigh. The retention bump literally means "don't let Claude Code delete files holotype is trying to read" — there's no scenario where the user wants holotype to silently lose data. The scheduled backup catches long sessions and crashed sessions that never fire a clean Stop hook — without it, the tool silently fails for the most common real-world session shapes.
 
-  Ask: "zstd isn't installed but I can `brew install zstd` for you so this archive gets compressed deposits (~30–60% smaller). Install? (Y/n)" — never run the install without explicit confirmation. If yes, run the install, then proceed with compression on. If no, fall back to `--compression none` and continue without compression.
+If a Bash call gets blocked by an auto-mode classifier or permission prompt, fall back to "show the user the `!<command>` form and explain it" (only for users who checked `the terminal`; for non-terminal users, the LLM keeps trying through the host's permission mechanism rather than dumping shell commands on them).
 
-If `low_confidence` is true (date span < 7 days), warn the user the projection is based on a short window and is approximate.
-
-Also offer to change archive location at this point (e.g., for a user with a small system disk who wants the archive on an external drive — go back to Step 1) or to cancel.
-
-**Step 3 — Privacy decision: remote or local-only?** This is the critical decision. State explicitly to the user, *before* offering options:
-
-> "The archive will contain verbatim Claude Code / Codex / Antigravity transcripts, including any file contents, command output, environment details, and tool results the agent saw during sessions. If you add a git remote, that data will be pushed to that remote when you sync — encrypted or not depending on your next choice. Choose carefully."
-
-Then offer the following four options, presented in this order so the recommended option is first:
-
-- **GitHub private repo (encrypted)** — *Recommended for paper-citable archives.* Transcripts are filtered through `git-crypt` before push, so GitHub stores only encrypted blobs. Manifests stay plaintext on the remote (session IDs, timestamps, models, project paths, token counts are visible there). This is the 3-2-1-backup-rule answer for scientific work: local archive + offsite encrypted backup + key backed up separately. **Requires `gh` authed + `git-crypt` installed + GPG key + explicit key-loss acknowledgment.**
-- **GitHub private repo (plain)** — Convenient if you fully trust GitHub with your transcript content. No extra dependencies beyond `gh` auth. Faster setup than the encrypted option, but the remote sees everything Claude saw.
-- **Local only** — No remote. Easiest install (no external dependencies), safest from third-party-data-exposure concerns, but single-disk-failure = data loss. Pick this if you don't yet have publishing aspirations for these sessions, or if institutional policy bans storing pre-publication data on third-party clouds in any form.
-- **Self-hosted / Synology / Other URL** — Gitea / Forgejo / GitLab CE / bare repo on a server you control, or a NAS at home, or any other git remote URL. The encryption choice at Step 4a applies here too — recommended if the server isn't fully under your control (institutional GitHub Enterprise, shared NAS).
-
-The encrypted-GitHub option is recommended because it covers the most common scientific-archive failure modes (single-disk loss + needing offsite backup for paper citations) without leaking transcript content to the remote. If the user picks it, the wizard chains through `gh repo create` + `git-crypt` install + key generation as needed — none of which happens silently. If the user picks any other option, Step 4a will still independently ask about encryption (it's a separate decision from "do I want a remote").
-
-**Step 4 — If a remote was chosen, get the URL.** For GitHub, also ask for org/account and repo name and offer to `gh repo create --private` it on the fly (but only if the user says "yes" — never silently).
-
-**Step 4a — Encryption-before-push (only if a remote was chosen).** If the user picked **GitHub private repo (encrypted)** at Step 3, encryption is already implied — skip the "y/N" question and go straight to the data-loss confirmation below. Otherwise (any other remote option in Step 3), ask:
-
-> "Filter transcripts through `git-crypt` before push, so the remote stores only encrypted blobs? (y/N — default no)
->
-> Choose yes if you don't fully trust the remote with the raw transcript content — e.g. an institutional GitHub Enterprise you share with non-collaborators, an S3-backed git provider, or a Synology NAS that other family members can access. Manifests stay plaintext on the remote (session IDs, timestamps, models, project paths, token totals are still visible there) — only the transcript file contents are encrypted.
->
-> **Data-loss risk**: if you lose the GPG key, every encrypted deposit becomes unrecoverable — including any paper-cited session. The key lives at `.git/git-crypt/keys/default` inside the archive and is NOT pushed to the remote. You MUST export and back it up to at least two locations (password manager + offline USB, paper QR backup, trusted collaborator) before depending on the archive for citation. Holotype cannot recover lost data."
-
-If the user says yes (or if encryption is implied from the Step 3 recommendation):
-- Verify `git-crypt` is on PATH (`command -v git-crypt`). If missing, offer to install via the same per-OS package manager the zstd step uses (`brew install git-crypt` / `apt install git-crypt` / `dnf install git-crypt` / `pacman -S git-crypt`). Require explicit confirmation before running the install.
-- Confirm the data-loss acknowledgment by repeating: *"You understand that losing the GPG key means the archive's encrypted deposits cannot be recovered. Holotype cannot recover lost data. Proceed? (yes/no)"* — only proceed on an unambiguous "yes."
-- The `init.py` invocation will need both `--encrypt-transcripts` and `--i-understand-key-loss-means-data-loss`.
-- After init completes, point the user at `<archive>/HOW_TO_BACK_UP_YOUR_KEY.md` and remind them to back up the key *before* the first ingest.
-
-If the user says no (or this step is skipped because no remote was chosen): proceed without encryption.
-
-**Step 4b — Auto-push policy (only if a remote was chosen).** Ask:
-
-> "Auto-push to `<url>` after every ingest? (Y/n — Recommended)
->
-> Recommended (Y) for most users: the archive stays in sync with the remote without you having to remember to push. Privacy decision already made when you picked the remote — transcripts will be pushed there.
->
-> Decline (n) if your transcripts may contain pre-publication embargo data, IP-sensitive lab measurements, or other material you want to gate on per-push review. With auto-push off, you'd run `git -C <archive> push` manually when you're ready to publish."
-
-Default is yes. The privacy warning was already shown at Step 3; this step is about *when* the user wants the push to happen, not *whether* the remote can see the data.
-
-**Step 4c — GPG-signed deposit commits.** Recommended for any archive destined for a paper's Zenodo deposit — signing adds a tamper-evident layer that survives cloning. Ask:
-
-> "GPG-sign every deposit commit? (Y/n — Recommended for paper-citable archives)
->
-> Adds the `--sign-commits` flag to init, setting `config.deposit.sign_commits=true` so every future deposit is GPG-signed."
-
-If the user says yes, check whether a signing key is configured:
+**Step G — First ingest (streaming progress, not buffered tail).** Run:
 
 ```bash
-git config --global user.signingkey
+python scripts/ingest.py --archive <path>
 ```
 
-- **A key is configured**: tell the user "Signing key already configured: `<keyid>`. Proceeding with signing on." and continue.
-- **No key configured**: offer to generate one — symmetric to the zstd/git-crypt install offers:
+Stream output live — do **not** pipe through `| tail -50`. A non-programmer staring at a frozen screen for 2+ minutes will assume the tool hung. If your host CLI lets you mark a long-running command as background or stream-tracked, do so.
 
-  > "No GPG signing key is configured. I can generate an Ed25519 key for you (modern, small, fast). The passphrase decision matters:
-  >   * **No passphrase** (recommended for an automated archive — the launchd / systemd tick can't answer a passphrase prompt). The key file on disk is the only thing protecting the signature.
-  >   * **Passphrase** — gpg-agent caches it across commits within a session, but background-tick ingests will fail until you unlock.
-  >
-  > Generate now? (Y/n)"
+**Step H — Tailored summary.** Show what got done, and how to undo each piece. Two variants based on the calibration answer:
 
-  If yes, ask one more question — whose identity to bind to the key:
-
-  > "Bind the key to which email? Defaults to your `git config --global user.email` value: `<email>`."
-
-  Then generate via `gpg --batch --gen-key` with a config block:
-
-  ```
-  %no-protection
-  Key-Type: EDDSA
-  Key-Curve: ed25519
-  Name-Real: <user.name>
-  Name-Email: <email>
-  Expire-Date: 0
-  %commit
-  ```
-
-  Extract the new key's fingerprint and wire it in:
-
-  ```bash
-  git config --global user.signingkey <FINGERPRINT>
-  git config --global gpg.program "$(command -v gpg)"
-  ```
-
-  Test it produces a signature before continuing:
-
-  ```bash
-  echo test | gpg --clearsign --local-user <FINGERPRINT> > /dev/null
-  ```
-
-  Then offer (optional, for the GitHub "Verified" badge): "Upload the public key to GitHub? Requires the `write:gpg_key` OAuth scope — I can refresh your `gh auth` for it, or you can skip and run `gh gpg-key add` later." If yes, run `gh auth refresh -s write:gpg_key` then `gpg --armor --export <FINGERPRINT> | gh gpg-key add -`.
-
-If the user declines signing entirely, init proceeds with `sign_commits=false`. The archive is still hash-chained — signing is an *additional* tamper layer, not a substitute for the per-session SHA-256.
-
-**Step 5 — Confirm before writing.** Show a summary as a structured table (Markdown table, or aligned text in CLIs that don't render Markdown):
+**For users who checked `git` + `terminal` (i.e. programmers)** — terse line items with shell undos:
 
 ```
-┌─────────────────────────────┬──────────────────────────────────────────────────────┐
-│           Setting           │                       Value                          │
-├─────────────────────────────┼──────────────────────────────────────────────────────┤
-│ Archive path                │ <abs-path>                                           │
-│ Compression                 │ <auto|none|zstd> (resolves to <zstd|none>)           │
-│ Remote                      │ <url-or-none>                                        │
-│ Encrypt transcripts at push │ <yes|no> [(git-crypt <version>)]                     │
-│ Key-loss ack                │ <Confirmed | n/a>                                    │
-│ Auto-push after ingest      │ <yes|no>                                             │
-│ GPG-signed commits          │ <yes|no> [(key <keyid>)]                             │
-└─────────────────────────────┴──────────────────────────────────────────────────────┘
+✓ Archive: ~/Documents/holotype-archive (zstd-compressed)
+✓ GPG signing on (key: ~/.gnupg, no passphrase)
+✓ Retention bumped to 36500 days (revert in ~/.claude/settings.json)
+✓ Launchd job io.holotype.ingest, 30-min interval (uninstall: python scripts/install-launchd.py --uninstall)
+✓ Pushed to <remote-url>, encrypted at rest (git-crypt key backed up to <location>)
+✓ Ingested 95 existing sessions (55 Claude Code + 40 Codex)
 ```
 
-Then ask "Proceed?" Wait for explicit confirmation. The user can still back out and revise any answer.
+**For users who checked nothing** — plain sentences with "ask Claude" undos:
 
-**Step 6 — Run init.** Call:
-```bash
-python scripts/init.py --path <abs-path> --remote-url <url-or-empty> --remote-kind <github-private|self-hosted|synology|other|none> --compression <auto|none|zstd> [--sign-commits] [--auto-push|--no-auto-push] [--encrypt-transcripts --i-understand-key-loss-means-data-loss]
-```
+> Done — here's what I set up on your Mac:
+> - Your Claude Code conversations are being saved to `~/Documents/holotype-archive`. They get compressed to save space.
+> - The saved copies have a tamper-proof signature so you can prove you wrote them if you cite them in a paper later. (To turn that off, ask Claude to "turn off holotype signing.")
+> - I told Claude Code to stop auto-deleting old conversations. (To turn that back on, ask Claude to "restore Claude Code's default retention.")
+> - I set up an automatic backup that runs every 30 minutes in the background, so new conversations get saved without you having to remember. (To turn that off, ask Claude to "turn off holotype's background backup.")
+> - 95 existing conversations were saved into the archive just now.
+> - I also set up an encrypted backup to a private GitHub repo (`<url>`) and saved the unscramble key to `<location>`. The local copy on your Mac is always readable; the GitHub copy needs the key.
 
-The script writes `<archive>/.holotype/config.json` (including the *resolved* compression mode — `auto` is replaced with the concrete choice — and the resolved auto-push flag), drops `VERIFY.md` + `README.md` into the archive, makes the initial commit, and writes a pointer file at `~/.config/holotype/archive-path` so future sessions can find the archive. If `--compression zstd` is forced but zstd isn't on PATH, init exits 2; `--compression auto` falls back to plain JSONL with a notice. Auto-push defaults to yes when `--remote-url` is set, no otherwise.
-
-**Step 7 — Host-CLI retention check.** Holotype's forensic-completeness promise has a hole if the host CLI prunes session transcripts before holotype can deposit them. Claude Code's default `cleanupPeriodDays` is 30; we want effectively-never. Run:
-
-```bash
-python scripts/configure-host-retention.py --check-only
-```
-
-If the script reports `would-update`, ask:
-
-> "Claude Code is set to delete session transcripts after N days. Holotype can't deposit what's been deleted. Bump retention to ~100 years (the canonical 'never prune' value)? (Y/n)"
-
-If yes:
-```bash
-python scripts/configure-host-retention.py
-```
-
-If the script reports `already-ok` or `skipped-not-installed`, no action needed.
-
-**Step 7a — Back up the git-crypt key (only if encryption is on).** Skip this step if `config.deposit.encrypt_transcripts` is false. Otherwise, drive the key-backup conversation now — *before* the launchd tick is installed and *before* the first ingest pushes encrypted blobs to the remote. The key was created by `init.py` at `<archive>/.git/git-crypt/keys/default`. It exists nowhere else. If this disk dies before the key is backed up, every encrypted deposit on the remote becomes permanently unrecoverable.
-
-State the situation explicitly:
-
-> "init created the git-crypt key at `<archive>/.git/git-crypt/keys/default`. That's the ONLY copy. Before the first ingest pushes encrypted blobs to GitHub, you should back it up to at least one offsite location. Where would you like to export it?"
-
-Detect candidate destinations on the user's machine BEFORE offering options:
-
-```bash
-# macOS iCloud Drive root
-test -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs" && echo iCloud_root
-# Desktop & Documents sync indicator (macOS iCloud Drive option)
-test -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents" && echo iCloud_documents
-# Other common cloud syncs
-test -d "$HOME/Dropbox" && echo dropbox
-test -d "$HOME/Google Drive" -o -d "$HOME/Library/CloudStorage/GoogleDrive-${USER}@gmail.com" && echo gdrive
-test -d "$HOME/OneDrive" && echo onedrive
-# 1Password CLI
-command -v op >/dev/null && echo op_cli
-```
-
-Offer destinations in this rough priority, presenting only those whose detection succeeded plus the manual-path option:
-
-- **1Password CLI (`op`)** — best for archives destined for paper citation; the key is stored as a secure note. After export, the local file should be shredded. Run: `git-crypt export-key /tmp/holotype-keyfile.key && op item create --category=password --title="holotype git-crypt key (<archive-name>)" --vault=Private holotype_key="$(base64 -i /tmp/holotype-keyfile.key)" && rm -P /tmp/holotype-keyfile.key`.
-- **iCloud Drive** — `~/Library/Mobile Documents/com~apple~CloudDocs/holotype-keyfile.key`. macOS encrypts in transit + at rest in iCloud. Counts as offsite automatically.
-- **Dropbox / Google Drive / OneDrive** — same idea, the user's chosen cloud sync.
-- **~/Documents/holotype-keyfile.key** — *only if iCloud Drive's "Desktop & Documents" sync is on* (detect via `iCloud_documents` above). Surface this explicitly: "Your `~/Documents/` is iCloud-synced; exporting here is automatically offsite." If iCloud Documents sync isn't on, downgrade this option (`~/Documents/` becomes "local disk only — move it elsewhere later").
-- **Custom path you provide** — the user types a path (e.g. an external USB drive mountpoint).
-- **Skip — I'll back it up myself** — last resort. Print the exact command for the user to run later: `cd <archive> && git-crypt export-key /path/to/your/backup-keyfile.key`.
-
-Run the export with the correct invocation (git-crypt is a top-level command, not a `git` subcommand):
-
-```bash
-cd <archive>
-git-crypt export-key <destination-path>
-chmod 0600 <destination-path>
-```
-
-After export, verify the file mode is 0600 and confirm whether the destination is genuinely offsite. If the destination is on the local disk only (not in any recognized cloud-sync location and not on a separate physical volume), surface this to the user honestly:
-
-> "Exported to `<path>`. This is on the same disk as the archive — it is NOT a real backup. If this disk dies, both the key and the encrypted remote become inaccessible. Move it to a cloud-synced folder, external drive, or password manager before depending on the archive for citation."
-
-If the destination IS in a recognized cloud-sync location (or 1Password CLI), confirm:
-
-> "Exported to `<path>` — this location is offsite-synced, so the key now exists on multiple physical devices. You're good. Refer to `<archive>/HOW_TO_BACK_UP_YOUR_KEY.md` for adding collaborators or a second backup destination."
-
-Either way, point the user at the archive's `HOW_TO_BACK_UP_YOUR_KEY.md` for the canonical reference (it covers `git-crypt export-key` syntax, recovery testing via `git clone` + `git-crypt unlock`, and adding collaborators via `git-crypt add-gpg-user`).
-
-**Step 8 — Background-tick opt-in (macOS only).** Ask:
-
-> "Claude Code / Codex sessions often run for hours without explicit close. A 30-minute background tick will catch sessions that the Stop hook misses by running `ingest.py` on a timer.
->
-> Push behavior follows your auto-push config: with auto-push **on** (your choice), the tick will deposit AND push after each cycle. With auto-push **off**, the tick only deposits locally; pushes remain manual.
->
-> Install? (Y/n)"
-
-If yes:
-```bash
-python scripts/install-launchd.py --archive <abs-path>
-```
-
-If on Linux or Windows, skip this step and tell the user the equivalent can be set up later via a user systemd unit (Linux — see `docs/LINUX_SYSTEMD.md`) or Task Scheduler (Windows).
-
-**Step 9a — First-ingest scale warning.** *Before* launching the first ingest, surface the realistic cost. Re-run `scripts/usage_estimate.py --json` to get current numbers and tell the user something like:
-
-> "Your existing host-CLI history is ~N session files totaling ~X GB. The first ingest will:
->   * Hash each transcript (fast — Apple Silicon SHA-NI / x86 SHA-NI)
->   * Compress each (zstd, fast)
->   * Encrypt each via git-crypt (if encryption is on)
->   * Commit each to the archive
->   * Push to the remote at the end (if auto-push is on — pushes ~Y GB of encrypted blobs)
->
-> Realistic ETAs (calibrate from the matrix below — choose the row that matches your config):"
-
-```
-┌──────────────────┬────────────┬────────────┬────────────────────────────────────────────────┐
-│   Configuration  │ Per-session│ Bulk-init  │                     Notes                      │
-├──────────────────┼────────────┼────────────┼────────────────────────────────────────────────┤
-│ Plain, no sign   │ ~3-5 min   │ ~1-2 min   │ Dominated by SQLite + git plumbing.            │
-│ Plain + sign     │ ~25-35 min │ ~3-5 min   │ Per-session: ~300 ms GPG sig × N commits.      │
-│ Encrypted        │ ~45-60 min │ ~45-55 min │ git-crypt forks per-file at `git add` time.    │
-│                  │            │            │ Bulk-initial does NOT save the filter cost.    │
-│ Encrypted + sign │ ~60-90 min │ ~50-70 min │ Encryption dominates; signing is one extra sig │
-│                  │            │            │ in bulk-initial mode. Plus push time — see     │
-│                  │            │            │ below.                                         │
-└──────────────────┴────────────┴────────────┴────────────────────────────────────────────────┘
-```
-
-> Numbers above are calibrated for ~6000-session / ~8 GB-source archives on Apple Silicon (M-series). Scale roughly linearly with session count. Subsequent (steady-state) ingests are fast in all configurations — only new sessions get processed.
->
-> **Push time scales with encrypted-pack size, not session count.** Encrypted bulk-initial of a 6000-session archive produces a ~2 GiB pack. Over a typical home upstream (~50 Mbps) that's ~5-7 min push time. **CRITICAL — GitHub rejects packs larger than 2.00 GiB on a single push** (undocumented limit; the error surfaces as HTTP 500 over HTTPS or "fatal: pack exceeds maximum allowed size" over SSH). If your encrypted bulk-initial commit would produce a pack near or above that, the FIRST push will fail.
->
-> *Recovery if the first push hits the 2 GiB limit*: run `python scripts/repush_chunked.py` — it soft-resets the bulk-initial commit, bin-packs the session directories into ~1.5 GiB chunks (each as its own signed commit), and pushes each sequentially. The hash chain is unaffected — holotype's chain is per-session SHA-256, not per-commit. Future v1.2 ingests will detect oversized packs and chunk automatically.
->
-> *Why encrypted bulk-initial isn't faster than per-session*: git-crypt invokes one fork+exec of its clean filter per file at `git add` time. The bulk-initial combined commit doesn't avoid this per-file filter cost — it only avoids the per-commit GPG signing cost. (We verified git-crypt 0.8.0 does NOT support git's long-running process-filter protocol, see `docs/ROADMAP.md`.)
->
-> **Use SSH transport for encrypted setups.** HTTPS gives cryptic HTTP 500 errors when GitHub rejects an oversized pack; SSH surfaces the actual `pack exceeds maximum allowed size` message that tells you to chunk. If the wizard configured a `https://` remote, switch via `git -C <archive> remote set-url origin git@github.com:USER/REPO.git`.
-
-Then offer the user a choice about commit topology for THIS first ingest:
-
-> "Per-session commits or one combined commit for the initial backfill?
->   * **Per-session** (default): one git commit per deposited session. Granular `git log sessions/X/Y/Z/` history. Slow with signing on (each commit signs separately).
->   * **Bulk-initial**: one combined `bulk-initial: N sessions ingested` commit for all backfilled sessions. Loses per-session ordering inside the initial backfill (they all share one commit). Saves the per-commit-sign cost (one sig instead of N). Does NOT save the per-file encryption cost.
->
-> Recommended for a fresh setup with hundreds-plus sessions to backfill AND signing on: **bulk-initial**. For smaller archives or when signing is off: **per-session** is fine."
-
-If they pick bulk-initial, pass the `--bulk-initial` flag.
-
-**Step 9b — First ingest, with live progress.** Run the initial deposit AS A BACKGROUND TASK and arm a Monitor that emits per-milestone events plus one completion event. Do NOT just `Bash run_in_background` and go silent — for a 5-30 minute ingest the user wants progress feedback.
-
-Kick off the ingest in the background:
-
-```bash
-python scripts/ingest.py --archive <abs-path> [--bulk-initial]
-```
-
-Immediately arm a Monitor with the following script. Counts deposited *manifests* (not commits) so the progress signal works for both per-session and `--bulk-initial` modes (manifests are written eagerly by `deposit_one()`; commits are deferred under `--bulk-initial`):
-
-```bash
-archive=<abs-path>
-start_ts=$(date +%s)
-start_files=$(find "$archive/sessions" -name manifest.json 2>/dev/null | wc -l | tr -d ' ')
-last_milestone=0
-while pgrep -f "scripts/ingest.py" > /dev/null; do
-  cur=$(find "$archive/sessions" -name manifest.json 2>/dev/null | wc -l | tr -d ' ')
-  delta=$((cur - start_files))
-  if [ "$delta" -ge "$((last_milestone + 500))" ]; then
-    elapsed=$(( $(date +%s) - start_ts ))
-    rate=$((delta * 60 / (elapsed + 1)))
-    echo "$(date +%H:%M:%S) milestone: manifests=$cur (+$delta) rate=${rate}/min elapsed=${elapsed}s"
-    last_milestone=$((last_milestone + 500))
-  fi
-  sleep 15
-done
-final=$(find "$archive/sessions" -name manifest.json 2>/dev/null | wc -l | tr -d ' ')
-elapsed=$(( $(date +%s) - start_ts ))
-echo "$(date +%H:%M:%S) COMPLETE: final manifests=$final (+$((final - start_files))) elapsed=${elapsed}s"
-```
-
-Set the Monitor `timeout_ms` to 3600000 (the maximum, 60 min) for a typical first ingest. Pick `description` like "holotype first-ingest progress (one event per ~500 deposits)" — that string appears in every notification the user sees.
-
-Each milestone event tells the user "we're alive, depositing at N/min, at K total." The COMPLETE event signals the cycle is over. When the Monitor notification fires, run the validation checks (Step 9c).
-
-For *subsequent* ingests (steady-state, after the first one) the Monitor is unnecessary — those typically finish in seconds-to-minutes for a normal daily delta. Background-tick ingests don't need a Monitor either; they're fire-and-forget and write to `~/Library/Logs/holotype-ingest.{out,err}` (or the launchd-configured paths).
-
-**Step 9c — Post-ingest validation.** After the Monitor's COMPLETE event fires, sanity-check the result:
-
-```bash
-# Counts by source
-python -c "
-from holotype.archive import iter_all_sessions
-from pathlib import Path
-counts = {}
-for _, m in iter_all_sessions(Path('<abs-path>')):
-    counts[m.get('source','?')] = counts.get(m.get('source','?'),0) + 1
-print('by source:', counts)
-"
-
-# Full hash-chain verify
-python scripts/verify.py --archive <abs-path>
-
-# Confirm the remote has the bulk-initial commit
-git -C <abs-path> log --oneline origin/main..HEAD 2>/dev/null || \
-  git -C <abs-path> log --oneline -3
-```
-
-Report the per-source counts, the verify summary, and (if a remote is configured) confirm the push landed. This is the canonical "setup done, archive is healthy" moment.
-
-**Do not skip the wizard.** If the user says "just set it up with defaults," walk through the questions anyway and let them say "yes, yes, local-only, yes, yes, yes, yes" to each. The point is informed consent on the storage cost, the remote decision, and on modifying the host CLI's settings — not speed.
+Hand off cleanly. Don't ask any further questions unless the user does.
 
 ## Where things live (after setup)
 
@@ -417,7 +189,7 @@ Read these before any operation:
 
 1. **Never hand-edit a deposited transcript.** The archive's git tree is append-only from outside. If a session JSONL grows in the source (a session keeps running and adds more turns), the next `ingest.py` will detect the change and record it as an `update` commit — that is the only mechanism by which a deposited transcript ever changes on disk.
 2. **Never filter content.** Tool calls, tool results, thinking blocks, system reminders, hook outputs — every byte is part of the scientific record. The skill's whole point is forensic completeness.
-3. **Push policy is set at archive-init time, not at ingest time.** When `config.deposit.auto_push` is true (the default when a remote was configured at init), ingest pushes after a successful cycle — that's what the user opted into at the wizard's Step 4b. When auto-push is false, only push when the user explicitly asks. Never *re-configure* push policy mid-stream without going back through the wizard; the privacy decision lives at init.
+3. **Push policy is set at archive-init time, not at ingest time.** When `config.deposit.auto_push` is true (the default when a remote was configured at init), ingest pushes after a successful cycle — that's what the user opted into when they said "yes, back up to GitHub" at setup. When auto-push is false, only push when the user explicitly asks. Never *re-configure* push policy mid-stream without going back through the wizard; the privacy decision lives at init.
 4. **The archive is git-tracked.** Every deposit is a commit with a deterministic message of the form `deposit: <project>/<session-id>` or `update: <project>/<session-id>`. Both the JSONL and its manifest live under `sessions/<project-dir>/<session-id>/`.
 5. **The SQLite index at `<archive>/.holotype/index.sqlite` is derived data.** It speeds up search. It is NOT a source of truth. It can be deleted and rebuilt with `scripts/reindex.py` (planned) at any time.
 6. **Live-file safety is built in.** `ingest.py` skips JSONLs modified in the last 2 seconds and re-checks mtime after reading. You should not need to add additional checks.
@@ -429,7 +201,7 @@ Read these before any operation:
 | First-time setup | Conduct wizard, then `python scripts/init.py --path <p> --remote-url <u> --remote-kind <k> --compression <auto|none|zstd>` |
 | Estimate storage cost from existing host-CLI history | `python scripts/usage_estimate.py` |
 | Check / bump host-CLI retention | `python scripts/configure-host-retention.py [--check-only]` |
-| Install macOS background tick (after setup) | `python scripts/install-launchd.py --archive <p>` |
+| Install macOS scheduled-backup job (auto, at setup) | `python scripts/install-launchd.py --archive <p>` |
 | Deposit new sessions (preferred — from the rsync backup) | `python scripts/ingest.py --source ~/Documents/Claude-Backups` |
 | Deposit directly from live Claude Code state | `python scripts/ingest.py --source ~/.claude/projects` |
 | Find sessions matching text (FTS5) | `python scripts/search.py "<query>"` |
@@ -438,7 +210,7 @@ Read these before any operation:
 | Produce a full citable bundle for one session | `python scripts/cite.py <session-id>` |
 | Bundle many sessions for a paper's Zenodo deposit | `python scripts/paper_bundle.py --sessions a,b,c --out <dir> [--tarball]` |
 | Recover when first push fails with "pack exceeds 2 GiB" | `python scripts/repush_chunked.py` |
-| Pause / resume the macOS background tick (for repo surgery) | `python scripts/install-launchd.py --pause` then `--resume` |
+| Pause / resume the macOS scheduled-backup job (for repo surgery) | `python scripts/install-launchd.py --pause` then `--resume` |
 | Check whether a newer holotype release is available | `python scripts/update_check.py [--json]` |
 | Verify the archive's hash chain | `python scripts/verify.py` |
 | Verify a single session | `python scripts/verify.py <session-id>` |
