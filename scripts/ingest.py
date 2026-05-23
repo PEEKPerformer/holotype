@@ -1004,7 +1004,7 @@ def main(argv: list[str] | None = None) -> int:
                 if push.stderr:
                     sys.stderr.write(push.stderr)
 
-        return 0 if any_changes else 1
+        return 0
     finally:
         try:
             fcntl.flock(lock, fcntl.LOCK_UN)

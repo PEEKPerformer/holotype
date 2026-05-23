@@ -2,6 +2,14 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] — 2026-05-23
+
+### Fixed
+
+- **`scripts/ingest.py` no longer exits with status 1 when there is nothing new to deposit.** Previously the script returned `1` whenever a tick found `unchanged=N empty=0 new=0 updated=0`, treating "nothing to do" as failure. This was wrong semantically and surfaced as a misleading `last exit code = 1` on the `io.holotype.ingest` launchd job after every idle tick, risking interaction with launchd's throttle/keepalive policies. Idle ticks now exit `0`. Ingest still propagates non-zero exit codes from real failures (Source parse errors, git failures, etc.).
+
+---
+
 ## [2.0.2] — 2026-05-22
 
 Repository-level JOSS-standard scaffolding. No functional code changes.

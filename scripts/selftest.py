@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             print(result.stdout)
         expect("new=0" in result.stdout and "unchanged=3" in result.stdout,
                f"second ingest was not a no-op:\n{result.stdout}")
-        expect(result.returncode == 1, "no-op ingest should exit 1 (no changes)")
+        expect(result.returncode == 0, "no-op ingest should exit 0 (nothing-to-do is success)")
 
         step("mutating a fixture causes an 'updated' deposit on next ingest")
         import os, time
