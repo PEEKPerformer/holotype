@@ -11,6 +11,7 @@ index card you can cite from.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,13 @@ from holotype.hashing import sha256_bytes, sha256_file
 from holotype.sources.base import Source
 
 
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
+
+# v5 added first/last_user_message_excerpt — see _clean_user_excerpt for
+# how source-specific wrappings (Codex <environment_context>, Antigravity
+# <USER_REQUEST>, Claude Code <system-reminder>) are stripped so the
+# excerpt reads as a real user message in the viewer's session cards.
+USER_EXCERPT_MAX_CHARS = 160
 
 
 @dataclass
@@ -79,9 +86,52 @@ class SessionManifest:
     total_output_tokens: int | None = None
     total_cache_creation_tokens: int | None = None
     total_cache_read_tokens: int | None = None
+    # Reader fields (manifest_version >= 5). Used by the in-browser viewer
+    # to show session-identifying excerpts in cards. Cleaned of source-
+    # specific wrappings (Codex <environment_context>, Antigravity
+    # <USER_REQUEST>, Claude Code <system-reminder>) so they read as plain
+    # user prose. The canonical text is in transcript.jsonl — this is a
+    # convenience field for the index UI.
+    first_user_message_excerpt: str | None = None
+    last_user_message_excerpt: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
+
+
+_WRAP_PATTERNS = [
+    # Antigravity: <USER_REQUEST>actual prose</USER_REQUEST>; keep inner
+    (re.compile(r"<USER_REQUEST>\s*(.+?)\s*</USER_REQUEST>", re.DOTALL), r"\1"),
+    # Antigravity + Claude Code: framing metadata blocks → drop entirely
+    (re.compile(r"<USER_SETTINGS_CHANGE>.*?</USER_SETTINGS_CHANGE>", re.DOTALL), ""),
+    (re.compile(r"<ADDITIONAL_METADATA>.*?</ADDITIONAL_METADATA>", re.DOTALL), ""),
+    (re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL), ""),
+    # Codex: <environment_context>...</environment_context> auto-prepended to
+    # the first user turn. Strip the whole block.
+    (re.compile(r"<environment_context>.*?</environment_context>", re.DOTALL), ""),
+    (re.compile(r"<user_instructions>.*?</user_instructions>", re.DOTALL), ""),
+]
+
+
+def _clean_user_excerpt(text: str | None) -> str | None:
+    """Strip source-specific wrapping tags and collapse whitespace.
+
+    The viewer's session cards display this. Wrapping tags are uninformative
+    in a one-line preview; the canonical text is in transcript.jsonl. Returns
+    None if nothing useful is left after stripping.
+    """
+    if not text:
+        return None
+    s = str(text)
+    for pat, repl in _WRAP_PATTERNS:
+        s = pat.sub(repl, s)
+    s = " ".join(s.split())
+    s = s.strip()
+    if not s:
+        return None
+    if len(s) > USER_EXCERPT_MAX_CHARS:
+        s = s[: USER_EXCERPT_MAX_CHARS - 1].rstrip() + "…"
+    return s
 
 
 def project_dir_decoded(encoded: str) -> str | None:
@@ -128,6 +178,10 @@ def scan_jsonl_lines(lines, source_cls: type[Source]) -> dict:
             "reasoning_output_tokens": 0,
         },
         "any_usage_seen": False,
+        # First and last text we saw on a role=user message (cleaned in
+        # build_manifest, before storage on the manifest dict).
+        "first_user_text": None,
+        "last_user_text": None,
     }
 
     for line in lines:
@@ -182,6 +236,16 @@ def scan_jsonl_lines(lines, source_cls: type[Source]) -> dict:
             state["has_thinking"] = True
         if "compaction" in info.flags:
             state["has_compaction"] = True
+
+        # Capture first/last user message text from the Source-provided
+        # fts_content. Cleaning happens later (in build_manifest) so this
+        # branch stays cheap on the hot scan loop.
+        if info.role == "user" and isinstance(info.fts_content, str):
+            txt = info.fts_content
+            if txt:
+                if state["first_user_text"] is None:
+                    state["first_user_text"] = txt
+                state["last_user_text"] = txt
 
         # Source-specific: Claude Code carries cwd on user-message
         # turns. Codex carries repository_url in the line-1 header
@@ -324,4 +388,6 @@ def build_manifest(
         total_output_tokens=token_totals["total_output_tokens"],
         total_cache_creation_tokens=token_totals["total_cache_creation_tokens"],
         total_cache_read_tokens=token_totals["total_cache_read_tokens"],
+        first_user_message_excerpt=_clean_user_excerpt(scan.get("first_user_text")),
+        last_user_message_excerpt=_clean_user_excerpt(scan.get("last_user_text")),
     )

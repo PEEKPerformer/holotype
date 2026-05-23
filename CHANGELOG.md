@@ -2,6 +2,40 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-05-23
+
+The reader is now usable at archive scale. Three categories of work, motivated by visually inspecting the v2.1.0 reader against a 3,056-session real archive.
+
+### Bug fixes
+
+- **`viewer.py` read the wrong manifest field for the project path.** Every session view said `project path: ?` because the renderer looked for `project_path` but manifest v4+ uses `project_dir_decoded`. Browse session cards also fell through to UUIDs.
+- **Browse index rendered with paper-bundle title/banner.** Said `holotype paper bundle` everywhere and instructed the user to look for a `view.html` file that doesn't exist in the live archive. `render_index` is now parameterized so the browse path uses its own strings.
+- **Real user prompts were styled as `system` (dim grey) blocks.** When Claude Code emits a user record with a string `message.content` (not the structured list-of-blocks form), the normalizer's fallback ignored the role and classified as system. Role now wins: a user-role record with string content becomes a user message regardless of content shape.
+- **Browse server failed to rebind on quick restart** (`Address already in use`). Now sets `allow_reuse_address`.
+- **Filtered `<synthetic>` from displayed model names** (a manifest sentinel that was leaking into the UI).
+- **Page title on session views was the raw UUID.** Now uses `holotype: <project-basename> · <short-id>` when a project path is recorded.
+
+### Reader UX
+
+- **Richer session cards.** Each card now leads with the project basename, not the UUID. Below: human-readable date (e.g. `May 22, 2026 · 11:49`), message count, `tools + thinking` badges, output-token engagement signal, model. A secondary line shows the short session ID, the repo URL when known, and any subagent count.
+- **Subagents grouped under their parent.** A 3,056-session archive used to render as 3,056 flat cards; now it renders as ~2,400 top-level cards with subagents in a per-parent collapsed `<details>`. Massive visual de-clutter.
+- **In-archive full-text search.** New `/search?q=...` route on the browse server. Hits the existing FTS5 index that powers `scripts/search.py` and renders highlighted snippets with project + date + role and a link to the session. The index page now carries a search form at the top.
+- **Default-collapse pre-conversation metadata.** Claude Code sessions open with 4-12 operational records (file-history snapshots, attachment deltas, system reminders) before the first real turn. The viewer now collapses that run into a single closed `<details>` so the user lands on the first conversation block.
+- **Default-collapse long tool results** (>600 chars). A 50-message session with verbose shell output used to dominate vertical scroll; now you see a preview and click to expand.
+- **Dark mode** via `@media (prefers-color-scheme: dark)` — both index and session views.
+- **`?raw=1` query param** on `/session/<id>` re-enables the verbatim-JSON `<details>` toggle the paper-bundle viewer ships by default but the browse viewer omits for size. Lets a curious user audit without leaving the UI.
+
+### Manifest schema (v5)
+
+- `manifest_version` bumped to **5**. Adds `first_user_message_excerpt` and `last_user_message_excerpt` — short, cleaned-of-wrapping-tags previews of the user's first/last message. Cleans `<environment_context>` (Codex), `<USER_REQUEST>`/`<USER_SETTINGS_CHANGE>`/`<ADDITIONAL_METADATA>` (Antigravity), and `<system-reminder>` (Claude Code) so the excerpt reads as plain user prose.
+- The browse viewer's session cards surface this excerpt below the project name. Existing v4 manifests continue to render fine (no excerpt line, falls back to the info line); excerpts populate as the existing manifest-version-mismatch backfill reprocesses old deposits on the next ingest.
+
+### Selftest
+
+New assertions: manifest v5 builds correctly; first-user-message excerpt is captured; browse index has the browse-specific title (not paper-bundle), search form present, dark-mode media query present, subagent grouping rendered; `?raw=1` plumbing re-enables raw-JSON toggles; `/search` returns either results or a no-results note.
+
+---
+
 ## [2.1.0] — 2026-05-23
 
 ### Added

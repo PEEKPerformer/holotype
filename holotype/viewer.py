@@ -112,7 +112,16 @@ def _normalize_claude_code(record: dict) -> Iterator[dict]:
 
     if not isinstance(content, list):
         if isinstance(content, str) and content:
-            yield {"kind": "system", "timestamp": ts, "role": role, "text": content,
+            # Role wins. A real user prompt arriving as a plain string
+            # (Claude Code does this sometimes) should still look like a
+            # user message in the UI, not a dim system block.
+            if role == "user":
+                kind = "user_message"
+            elif role == "assistant":
+                kind = "assistant_message"
+            else:
+                kind = "system"
+            yield {"kind": kind, "timestamp": ts, "role": role, "text": content,
                    "model": model, "raw": record}
             return
         yield {"kind": "unknown", "timestamp": ts, "role": role, "model": model, "raw": record}
@@ -308,7 +317,7 @@ def _normalize_record(source: str, record: dict) -> Iterator[dict]:
 
 _CSS = """\
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --fg: #1a1a1a;
   --bg: #fbfbf9;
   --muted: #6a6a6a;
@@ -328,6 +337,31 @@ _CSS = """\
   --meta-border: #d8d6cf;
   --unknown-bg: #fbeded;
   --unknown-border: #d4a0a0;
+  --accent: #2c4a7a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #ececec;
+    --bg: #16161a;
+    --muted: #9b9b9b;
+    --border: #2a2a30;
+    --code-bg: #1d1d22;
+    --user-bg: #1b2436;
+    --user-border: #3a4d6f;
+    --assistant-bg: #1a1a1f;
+    --assistant-border: #2e2e36;
+    --thinking-bg: #221f1a;
+    --thinking-border: #45402f;
+    --tool-bg: #221f12;
+    --tool-border: #4d4622;
+    --tool-result-bg: #1d1c14;
+    --tool-result-border: #3e3a26;
+    --meta-bg: #18181c;
+    --meta-border: #2a2a30;
+    --unknown-bg: #2a1414;
+    --unknown-border: #5f2828;
+    --accent: #8aa9e0;
+  }
 }
 * { box-sizing: border-box; }
 body {
@@ -464,6 +498,91 @@ footer a { color: var(--muted); }
   color: var(--muted);
   font-size: .82rem;
 }
+.session-card .excerpt {
+  color: var(--fg);
+  font-size: .88rem;
+  margin: .25rem 0;
+  font-style: italic;
+  opacity: .85;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.session-card .cardmeta {
+  color: var(--muted);
+  font-size: .72rem;
+  margin-top: .2rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: .8;
+}
+.session-card.subagent {
+  margin-left: 1.5rem;
+  background: var(--meta-bg);
+}
+details.subagents {
+  margin: -.25rem 0 .35rem 0;
+}
+details.subagents > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: .8rem;
+  margin: .25rem 0 .35rem 1.5rem;
+}
+details.leading-meta {
+  margin: .5rem 0;
+}
+details.leading-meta > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: .85rem;
+  padding: .35rem .6rem;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: var(--meta-bg);
+}
+form.search {
+  display: flex;
+  gap: .5rem;
+  margin: 0 0 1rem 0;
+}
+form.search input[type=search] {
+  flex: 1;
+  padding: .5rem .7rem;
+  font: inherit;
+  font-size: .95rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+form.search input[type=search]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+form.search button {
+  padding: .5rem 1rem;
+  font: inherit;
+  font-size: .9rem;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.search-result {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .55rem .75rem;
+  margin: .35rem 0;
+  background: var(--bg);
+  font-size: .9rem;
+}
+.search-result a { color: var(--accent); text-decoration: none; }
+.search-result a:hover { text-decoration: underline; }
+.search-result .snippet { color: var(--fg); margin-top: .2rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; white-space: pre-wrap; }
+.search-result .snippet mark { background: rgba(255, 222, 113, 0.45); color: inherit; padding: 0 1px; }
+.no-results { color: var(--muted); padding: 1rem 0; }
 
 @media print {
   body { background: white; padding: 0; }
@@ -505,7 +624,11 @@ _DOC_CLOSE = "</main>\n</body>\n</html>\n"
 # ----- Block rendering -----------------------------------------------------
 
 
-def _render_block(block: dict, include_raw: bool = True) -> str:
+_LONG_OUTPUT_CHARS = 600
+
+
+def _render_block(block: dict, include_raw: bool = True,
+                  collapse_long_tool_results: bool = True) -> str:
     kind = block.get("kind", "unknown")
     role = block.get("role")
     ts = _fmt_ts(block.get("timestamp"))
@@ -563,7 +686,15 @@ def _render_block(block: dict, include_raw: bool = True) -> str:
             parts.append(f'<div class="tool-meta">for: {_escape(tn)}</div>')
         out = block.get("tool_output") or ""
         if out:
-            parts.append(f'<pre>{_escape(out)}</pre>')
+            if collapse_long_tool_results and len(out) > _LONG_OUTPUT_CHARS:
+                preview = out[:_LONG_OUTPUT_CHARS].rstrip()
+                parts.append(
+                    f'<pre>{_escape(preview)}…</pre>'
+                    f'<details><summary>show all ({len(out):,} chars)</summary>'
+                    f'<pre>{_escape(out)}</pre></details>'
+                )
+            else:
+                parts.append(f'<pre>{_escape(out)}</pre>')
     elif kind == "image":
         mt = block.get("image_media_type")
         data = block.get("image_data_b64")
@@ -579,7 +710,10 @@ def _render_block(block: dict, include_raw: bool = True) -> str:
         else:
             parts.append('<p class="text">(image attachment — source not base64-decodable)</p>')
     elif kind == "unknown":
-        parts.append('<p class="text">(record shape not recognized — see raw JSON below)</p>')
+        msg = ("(record shape not recognized — see raw JSON below)"
+               if include_raw else
+               "(record shape not recognized)")
+        parts.append(f'<p class="text">{msg}</p>')
 
     if include_raw:
         raw = block.get("raw")
@@ -609,19 +743,28 @@ def _read_transcript_records(transcript_path: Path) -> Iterator[dict]:
 
 
 def render_session(manifest: dict, transcript_path: Path, out_path: Path,
-                   include_raw: bool = True) -> None:
+                   include_raw: bool = True,
+                   collapse_long_tool_results: bool = True,
+                   collapse_leading_meta: bool = True) -> None:
     """Write ``view.html`` rendering ``transcript_path`` for one session.
 
-    ``include_raw`` controls whether each block carries a ``<details>`` with
-    its verbatim JSONL record. Default True (the paper-bundle case, where
-    reviewers need to verify the rendering is faithful). Set False for the
-    casual-browse case where output size matters more than per-block audit
-    (the canonical JSONL is right next to the HTML either way).
+    ``include_raw`` — embed each record's raw JSON in a ``<details>`` toggle.
+    Default True for paper bundles (reviewers verify rendering faithfulness).
+    Browse mode passes False (canonical JSONL sits next to the HTML).
+
+    ``collapse_long_tool_results`` — wrap tool results > _LONG_OUTPUT_CHARS
+    in a closed ``<details>`` so long shell output doesn't dominate scroll.
+
+    ``collapse_leading_meta`` — collect the run of meta/system records at
+    the top of the transcript (file-history snapshots, queue ops, attachment
+    deltas, system reminders) into a single closed ``<details>``. Real
+    conversation usually starts 5–15 records deep; this hides operational
+    noise without dropping it.
     """
     source = manifest.get("source") or "unknown"
     session_id = manifest.get("session_id") or "?"
     sha = manifest.get("sha256") or "?"
-    models = manifest.get("models") or []
+    models = [m for m in (manifest.get("models") or []) if m != "<synthetic>"]
     deposited = manifest.get("deposited_at") or "?"
     first_ts = manifest.get("first_timestamp") or "?"
     last_ts = manifest.get("last_timestamp") or "?"
@@ -629,12 +772,28 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path,
     tok_in = manifest.get("total_input_tokens")
     tok_out = manifest.get("total_output_tokens")
     wall = manifest.get("wall_clock_seconds")
-    project = manifest.get("project_path") or manifest.get("project") or ""
+    # Canonical field on manifest v4+ is project_dir_decoded; older keys
+    # (project_path, project) are read as fallbacks so historical manifests
+    # don't show "?" if they ever existed.
+    project = (manifest.get("project_dir_decoded") or manifest.get("project_path")
+               or manifest.get("project") or "")
     gs = manifest.get("project_git_state") or {}
 
-    parts = [_doc_open(f"holotype: {session_id}")]
+    project_basename = _project_basename(project) if project else ""
+    short_id = session_id[:8] if len(session_id) >= 8 else session_id
+    if project_basename:
+        page_title = f"holotype: {project_basename} · {short_id}"
+        heading = f"{project_basename}"
+        sub_heading = f'<div class="cardmeta">id {_escape(session_id)}</div>'
+    else:
+        page_title = f"holotype: {session_id}"
+        heading = session_id
+        sub_heading = ""
+    parts = [_doc_open(page_title)]
     parts.append('<header class="session">')
-    parts.append(f"<h1>{_escape(session_id)}</h1>")
+    parts.append(f"<h1>{_escape(heading)}</h1>")
+    if sub_heading:
+        parts.append(sub_heading)
     meta_rows = [
         ("source", source),
         ("models", ", ".join(models) if models else "?"),
@@ -655,17 +814,41 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path,
         parts.append(f"<span>{_escape(k)}</span><span>{_escape(v)}</span>")
     parts.append("</div></header>")
 
-    parts.append(
-        '<p class="banner">This page is a rendering of <code>transcript.jsonl</code>. '
-        "The JSONL is the canonical artifact; this HTML is regenerated from it and is not "
-        "part of the hash chain. Each block carries a raw-JSON toggle so you can verify the "
-        "rendering is faithful.</p>"
+    banner_text = (
+        "This page is a rendering of <code>transcript.jsonl</code>. The JSONL is "
+        "the canonical artifact; this HTML is regenerated from it and is not part "
+        "of the hash chain."
+        + (" Each block carries a raw-JSON toggle so you can verify the rendering "
+           "is faithful." if include_raw else "")
     )
+    parts.append(f'<p class="banner">{banner_text}</p>')
 
+    # Stream-classify blocks. Default-collapse the leading run of meta/system
+    # records (file-history snapshots, queue ops, attachment deltas, system
+    # reminders) into one collapsed <details> so the user lands on the first
+    # real conversation turn. Once any non-meta block appears the rest renders
+    # inline as before.
+    leading_meta: list[str] = []
+    in_leading = bool(collapse_leading_meta)
     seen_any = False
+
+    def flush_leading():
+        if leading_meta:
+            n = len(leading_meta)
+            parts.append(
+                f'<details class="leading-meta"><summary>{n} pre-conversation '
+                f"system event{'s' if n != 1 else ''} (file-history, attachments, "
+                "reminders) — click to expand</summary>"
+                + "".join(leading_meta)
+                + "</details>"
+            )
+            leading_meta.clear()
+
     for record in _read_transcript_records(transcript_path):
         if "_holotype_unparseable" in record:
             seen_any = True
+            in_leading = False
+            flush_leading()
             parts.append(
                 '<div class="block unknown"><div class="label">'
                 "<span>unparseable line</span><span></span></div>"
@@ -674,7 +857,20 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path,
             continue
         for block in _normalize_record(source, record):
             seen_any = True
-            parts.append(_render_block(block, include_raw=include_raw))
+            block_html = _render_block(
+                block, include_raw=include_raw,
+                collapse_long_tool_results=collapse_long_tool_results,
+            )
+            if in_leading and block.get("kind") in {"meta", "system", "unknown"}:
+                leading_meta.append(block_html)
+            else:
+                if in_leading:
+                    flush_leading()
+                    in_leading = False
+                parts.append(block_html)
+
+    # If the whole transcript was meta (unusual), flush so we render something.
+    flush_leading()
 
     if not seen_any:
         parts.append('<p class="banner">(transcript was empty)</p>')
@@ -688,23 +884,142 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path,
     out_path.write_text("".join(parts), encoding="utf-8")
 
 
-def render_index(bundle_dir: Path, bundle_manifest: dict, out_path: Path) -> None:
-    """Write ``index.html`` listing all sessions in the bundle."""
+def render_search_page(
+    query: str,
+    hits: list[dict],
+    out_path: Path,
+    *,
+    href_pattern: str = "/session/{sid}",
+) -> None:
+    """Render a search-results page mirroring index.html's framing."""
+    title = f"holotype — search: {query}" if query else "holotype — search"
+    parts = [_doc_open(title)]
+    parts.append('<header class="session">')
+    parts.append(f"<h1>{_escape(title)}</h1>")
+    parts.append(
+        '<div class="meta">'
+        f"<span>matches</span><span>{len(hits)}</span>"
+        f"<span>query</span><span>{_escape(query) or '(empty)'}</span>"
+        "</div></header>"
+    )
+    parts.append(
+        '<form class="search" action="/search" method="get" role="search">'
+        '<input type="search" name="q" placeholder="search transcripts (FTS5)" '
+        f'value="{_escape(query)}" autofocus>'
+        '<button type="submit">search</button>'
+        '</form>'
+    )
+    if not hits:
+        parts.append('<p class="no-results">No matches. FTS5 syntax: bare terms (porter stemming, '
+                     'AND default), <code>"exact phrase"</code>, '
+                     '<code>foo OR bar</code>, <code>NEAR(a b, 5)</code>.</p>')
+    else:
+        for h in hits:
+            sid = h.get("session_id") or "?"
+            ts = (h.get("first_ts") or "").split("T")[0]
+            project = _project_basename(h.get("project_dir")) or h.get("project_dir") or ""
+            role = h.get("role") or "?"
+            snippet = h.get("snippet") or ""
+            # FTS5 snippet() markers « » → <mark>. We escape the body first
+            # then unescape just the markers we control.
+            esc = _escape(snippet).replace("«", "<mark>").replace("»", "</mark>")
+            href = href_pattern.format(sid=sid)
+            head = f"<strong>{_escape(project)}</strong> · {_escape(ts)} · {_escape(role)}" if project else f"{_escape(ts)} · {_escape(role)}"
+            parts.append(
+                f'<div class="search-result">'
+                f'<a href="{_escape(href)}">{head} → open</a>'
+                f'<div class="snippet">{esc}</div>'
+                "</div>"
+            )
+    parts.append(_DOC_CLOSE)
+    out_path.write_text("".join(parts), encoding="utf-8")
+
+
+def _human_date(iso: str | None) -> str:
+    """ISO-8601 -> 'May 22, 2026 · 11:49' (UTC). Empty string on failure."""
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime
+        s = iso.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%b %-d, %Y · %H:%M")
+    except (ValueError, TypeError):
+        return str(iso)
+
+
+def _project_basename(project_dir: str | None) -> str:
+    if not project_dir:
+        return ""
+    p = project_dir.rstrip("/").split("/")[-1]
+    return p or project_dir
+
+
+def _card_info_line(sess: dict) -> str:
+    """One info line per session card: human date • messages • badges • output tokens."""
+    parts: list[str] = []
+    first = _human_date(sess.get("first_timestamp"))
+    if first:
+        parts.append(first)
+    msgs = sess.get("message_count")
+    if msgs is not None:
+        parts.append(f"{msgs} msg")
+    badges: list[str] = []
+    if sess.get("has_tool_use"):
+        badges.append("tools")
+    if sess.get("has_thinking"):
+        badges.append("thinking")
+    if badges:
+        parts.append(" + ".join(badges))
+    tok_out = sess.get("total_output_tokens")
+    if isinstance(tok_out, int) and tok_out > 0:
+        if tok_out >= 1000:
+            parts.append(f"{tok_out//1000}k out")
+        else:
+            parts.append(f"{tok_out} out")
+    models = [m for m in (sess.get("models") or []) if m and m != "<synthetic>"]
+    if models:
+        parts.append(", ".join(models))
+    return " • ".join(parts)
+
+
+def render_index(
+    bundle_dir: Path,
+    bundle_manifest: dict,
+    out_path: Path,
+    *,
+    title: str = "holotype paper bundle",
+    banner: str | None = None,
+    href_pattern: str = "{sid}/view.html",
+    show_search: bool = False,
+    search_query: str = "",
+    children_by_parent: dict[str, list[dict]] | None = None,
+) -> None:
+    """Write ``index.html`` listing all sessions.
+
+    ``title`` and ``banner`` let the browse-server path use distinct prose
+    from the paper-bundle path. ``href_pattern`` is a format string for
+    each card's link; the browse server passes ``"/session/{sid}"`` to
+    route through its handler. ``show_search`` adds a top-of-page search
+    form. ``children_by_parent`` groups subagent sessions under their
+    parent's card; pass None to render flat.
+    """
     sessions = bundle_manifest.get("sessions") or []
     paper_title = bundle_manifest.get("paper_title")
     paper_doi = bundle_manifest.get("paper_doi")
     produced_at = bundle_manifest.get("produced_at") or ""
     archive_commit = bundle_manifest.get("archive_commit") or ""
+    children_by_parent = children_by_parent or {}
 
-    title = "holotype paper bundle"
     parts = [_doc_open(title)]
     parts.append('<header class="session">')
     parts.append(f"<h1>{_escape(title)}</h1>")
     meta_rows: list[tuple[str, Any]] = [
-        ("produced", produced_at),
-        ("archive HEAD", archive_commit),
+        ("produced", _human_date(produced_at) or produced_at),
         ("sessions", len(sessions)),
     ]
+    if archive_commit:
+        meta_rows.append(("archive HEAD", archive_commit))
     if paper_title:
         meta_rows.insert(0, ("paper", paper_title))
     if paper_doi:
@@ -714,30 +1029,62 @@ def render_index(bundle_dir: Path, bundle_manifest: dict, out_path: Path) -> Non
         parts.append(f"<span>{_escape(k)}</span><span>{_escape(v)}</span>")
     parts.append("</div></header>")
 
-    parts.append(
-        '<p class="banner">Open any session below to read the rendered transcript. '
-        "Each session directory contains the canonical <code>transcript.jsonl</code>, the "
-        "<code>manifest.json</code>, and a <code>view.html</code> regenerated from the JSONL.</p>"
-    )
+    if show_search:
+        parts.append(
+            '<form class="search" action="/search" method="get" role="search">'
+            '<input type="search" name="q" placeholder="search transcripts (FTS5)" '
+            f'value="{_escape(search_query)}" autofocus>'
+            '<button type="submit">search</button>'
+            "</form>"
+        )
+
+    if banner:
+        parts.append(f'<p class="banner">{banner}</p>')
 
     for sess in sessions:
         sid = sess.get("session_id") or "?"
-        models = ", ".join(sess.get("models") or []) or "?"
-        msgs = sess.get("message_count")
-        first = _fmt_ts(sess.get("first_timestamp"))
-        last = _fmt_ts(sess.get("last_timestamp"))
+        project = _project_basename(sess.get("project_dir_decoded"))
+        heading = project or sid
+        sid_short = sid[:8] if len(sid) >= 8 else sid
+        sub_count = len(children_by_parent.get(sid, []))
+        info = _card_info_line(sess)
+        href = href_pattern.format(sid=sid)
         gs = sess.get("project_git_state") or {}
         repo = gs.get("remote") or ""
-        href = f"{sid}/view.html"
-        info = f"{models} • {msgs if msgs is not None else '?'} messages • {first} → {last}"
+        bottom: list[str] = []
+        bottom.append(f"id {sid_short}")
         if repo:
-            info += f" • {repo}"
+            bottom.append(_escape(repo))
+        if sub_count:
+            bottom.append(f"+{sub_count} subagent{'s' if sub_count != 1 else ''}")
+
+        excerpt = sess.get("first_user_message_excerpt") or ""
+        excerpt_html = (
+            f'<div class="excerpt">{_escape(excerpt)}</div>' if excerpt else ""
+        )
         parts.append(
             f'<a class="session-card" href="{_escape(href)}">'
-            f"<h2>{_escape(sid)}</h2>"
+            f"<h2>{_escape(heading)}</h2>"
+            f'{excerpt_html}'
             f'<div class="info">{_escape(info)}</div>'
+            f'<div class="cardmeta">{" · ".join(bottom)}</div>'
             "</a>"
         )
+
+        if sub_count:
+            parts.append('<details class="subagents"><summary>'
+                         f"subagents ({sub_count})</summary>")
+            for child in children_by_parent.get(sid, []):
+                csid = child.get("session_id") or "?"
+                cinfo = _card_info_line(child)
+                chref = href_pattern.format(sid=csid)
+                parts.append(
+                    f'<a class="session-card subagent" href="{_escape(chref)}">'
+                    f"<h2>{_escape(csid)}</h2>"
+                    f'<div class="info">{_escape(cinfo)}</div>'
+                    "</a>"
+                )
+            parts.append("</details>")
 
     parts.append(
         '<footer>structured manifest: <a href="BUNDLE_MANIFEST.json">BUNDLE_MANIFEST.json</a> '

@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import html as _html
 import http.server
-import io
 import json
 import os
 import platform
@@ -31,13 +30,14 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype.compression import read_transcript_bytes
-from holotype.viewer import render_index, render_session
+from holotype.index import open_index, search as fts_search
+from holotype.viewer import render_index, render_search_page, render_session
 
 
 def find_archive(explicit: Path | None) -> Path:
@@ -81,45 +81,69 @@ def collect_sessions(archive: Path) -> dict[str, tuple[Path, dict]]:
     return out
 
 
+_INDEX_FIELDS = (
+    "session_id", "parent_session_id", "models", "message_count",
+    "first_timestamp", "last_timestamp", "project_git_state",
+    "project_dir_decoded", "has_tool_use", "has_thinking",
+    "total_input_tokens", "total_output_tokens",
+    "first_user_message_excerpt", "last_user_message_excerpt",
+)
+
+
+def _session_meta_for_index(m: dict) -> dict:
+    """Project the manifest down to the fields the renderer cares about."""
+    return {k: m.get(k) for k in _INDEX_FIELDS}
+
+
 def render_index_html(archive: Path, sessions: dict[str, tuple[Path, dict]]) -> bytes:
-    """Build an in-memory ``index.html`` whose session cards link to /session/<sid>."""
+    """Build the archive index. Subagents nest under their parent's card."""
+    # Group by top-level vs subagent. A session is a subagent iff its
+    # parent_session_id is set AND the parent is in the archive.
+    by_id = {sid: m for sid, (_, m) in sessions.items()}
+    children: dict[str, list[dict]] = {}
+    top_ids: list[str] = []
+    for sid, (_, m) in sessions.items():
+        parent = m.get("parent_session_id")
+        if parent and parent in by_id:
+            children.setdefault(parent, []).append(_session_meta_for_index(m))
+        else:
+            top_ids.append(sid)
+
+    # Sort top-level by last_timestamp desc; children by first_timestamp asc
+    # (so they read in chronological order within a parent).
+    top_ids.sort(key=lambda s: by_id[s].get("last_timestamp") or "", reverse=True)
+    for parent_id in children:
+        children[parent_id].sort(key=lambda c: c.get("first_timestamp") or "")
+
     bundle_manifest = {
         "produced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "archive_commit": "",
-        "sessions": [
-            {
-                "session_id": sid,
-                "models": m.get("models") or [],
-                "message_count": m.get("message_count"),
-                "first_timestamp": m.get("first_timestamp"),
-                "last_timestamp": m.get("last_timestamp"),
-                "project_git_state": m.get("project_git_state"),
-            }
-            for sid, (_, m) in sorted(
-                sessions.items(),
-                key=lambda x: x[1][1].get("last_timestamp") or "",
-                reverse=True,
-            )
-        ],
+        "sessions": [_session_meta_for_index(by_id[sid]) for sid in top_ids],
     }
-    buf = io.BytesIO()
-    # render_index writes to a Path; do it via a NamedTemporaryFile.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        render_index(archive, bundle_manifest, tmp_path)
+        render_index(
+            archive,
+            bundle_manifest,
+            tmp_path,
+            title="holotype — your archive",
+            banner=(
+                f"<strong>{len(by_id)}</strong> session{'s' if len(by_id) != 1 else ''} saved "
+                f"in <code>{html_escape(str(archive))}</code>. "
+                "Click any card to read the transcript. Cards are sorted newest first."
+            ),
+            href_pattern="/session/{sid}",
+            show_search=True,
+            children_by_parent=children,
+        )
         text = tmp_path.read_text(encoding="utf-8")
     finally:
         tmp_path.unlink(missing_ok=True)
-    # Rewrite href="<sid>/view.html" → href="/session/<sid>"
-    text = text.replace('href="', 'href="')  # noop, keeps mypy quiet
-    # The viewer emits href=\"<sid>/view.html\"; rewrite to server route.
-    for sid in sessions:
-        text = text.replace(f'href="{sid}/view.html"', f'href="/session/{quote(sid)}"')
     return text.encode("utf-8")
 
 
-def render_session_html(sess_dir: Path, manifest: dict) -> bytes | None:
+def render_session_html(sess_dir: Path, manifest: dict, *, include_raw: bool = False) -> bytes | None:
     """Decompress + render one session to HTML bytes (no disk cache)."""
     transcript_bytes = read_transcript_bytes(sess_dir)
     if transcript_bytes is None:
@@ -130,11 +154,41 @@ def render_session_html(sess_dir: Path, manifest: dict) -> bytes | None:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp:
         out_path = Path(tmp.name)
     try:
-        render_session(manifest, in_path, out_path, include_raw=False)
+        render_session(manifest, in_path, out_path, include_raw=include_raw)
         return out_path.read_bytes()
     finally:
         in_path.unlink(missing_ok=True)
         out_path.unlink(missing_ok=True)
+
+
+def render_search_html(archive: Path, query: str, limit: int = 50) -> bytes:
+    """Run the FTS5 search and render results to HTML bytes."""
+    index_path = archive / ".holotype" / "index.sqlite"
+    if not index_path.exists():
+        # No index. Render the page with an empty result set + a note.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            render_search_page(query, [], tmp_path)
+            return tmp_path.read_bytes()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    try:
+        with open_index(index_path) as conn:
+            hits = fts_search(conn, query, limit=limit) if query else []
+    except Exception:
+        hits = []
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        render_search_page(query, hits, tmp_path)
+        return tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def html_escape(s: str) -> str:
+    return _html.escape(s, quote=True)
 
 
 class BrowseHandler(http.server.BaseHTTPRequestHandler):
@@ -162,26 +216,30 @@ class BrowseHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        from urllib.parse import parse_qs
         url = urlparse(self.path)
         path = url.path
+        query = parse_qs(url.query)
         if path in ("/", "/index.html"):
-            # Reload session list on every index hit so newly-ingested sessions
-            # show up without restarting the server.
             BrowseHandler.sessions = collect_sessions(BrowseHandler.archive)
             self._ok(render_index_html(BrowseHandler.archive, BrowseHandler.sessions))
+            return
+        if path == "/search":
+            q = (query.get("q") or [""])[0].strip()
+            self._ok(render_search_html(BrowseHandler.archive, q))
             return
         if path.startswith("/session/"):
             sid = unquote(path[len("/session/"):])
             entry = BrowseHandler.sessions.get(sid)
             if entry is None:
-                # Refresh in case the session was added since last index hit.
                 BrowseHandler.sessions = collect_sessions(BrowseHandler.archive)
                 entry = BrowseHandler.sessions.get(sid)
             if entry is None:
                 self._not_found(f"session {sid} not in archive")
                 return
             sess_dir, manifest = entry
-            body = render_session_html(sess_dir, manifest)
+            include_raw = (query.get("raw") or ["0"])[0] in ("1", "true", "yes")
+            body = render_session_html(sess_dir, manifest, include_raw=include_raw)
             if body is None:
                 self._not_found(f"session {sid}: transcript unreadable")
                 return
@@ -216,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Bind to 127.0.0.1 only — the archive contains every conversation Claude
     # Code wrote on this machine. Don't expose to the LAN.
+    # allow_reuse_address so a quick kill + restart doesn't hit TIME_WAIT.
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
     server = socketserver.ThreadingTCPServer(("127.0.0.1", args.port), BrowseHandler)
     server.daemon_threads = True
     actual_port = server.server_address[1]

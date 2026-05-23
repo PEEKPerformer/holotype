@@ -204,11 +204,17 @@ def main(argv: list[str] | None = None) -> int:
                 manifest["sha256"] == recomputed,
                 f"sha256 mismatch for {tr}: manifest={manifest['sha256']}, recomputed={recomputed}",
             )
-            expect(manifest["manifest_version"] == 4, "manifest_version != 4")
+            expect(manifest["manifest_version"] == 5, "manifest_version != 5")
             expect(manifest.get("source") == "claude-code",
                    f"manifest.source wrong: {manifest.get('source')}")
             expect(manifest["message_count"] > 0, "message_count is zero")
             expect(len(manifest["models"]) > 0, "no models recorded")
+            # v5: first_user_message_excerpt is captured + stripped of wrappings.
+            # The synthetic fixture's first user message is "What is 2 + 2?".
+            if manifest.get("session_id", "").startswith("00000000-0000-4000-8000-000000000001"):
+                excerpt = manifest.get("first_user_message_excerpt")
+                expect(excerpt and "What is 2" in excerpt,
+                       f"first_user_message_excerpt missing/wrong: {excerpt!r}")
 
         step("multi-model fixture records both models")
         mm_manifest_path = next(
@@ -543,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
                f"expected exactly 1 migration commit, got {len(new_commits)}:\n{chr(10).join(new_commits)}")
         expect("migrate:" in new_commits[0],
                f"expected `migrate:` prefix on combined commit: {new_commits[0]}")
-        expect("schema v4" in new_commits[0],
+        expect("schema v5" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
 
         step("--workers > 1 (parallel path) produces a clean archive")
@@ -941,7 +947,21 @@ def main(argv: list[str] | None = None) -> int:
                "browse index contains a <script> tag")
         expect(b"Content-Security-Policy" in index_bytes,
                "browse index missing CSP meta")
-        # Each card's href must be rewritten to the /session/<sid> server route.
+        # v2.2: index title is the browse-specific string, not "paper bundle".
+        expect(b"holotype \xe2\x80\x94 your archive" in index_bytes or b"your archive" in index_bytes,
+               "browse index missing browse-specific title")
+        expect(b"paper bundle" not in index_bytes,
+               "browse index leaked paper-bundle title text")
+        # v2.2: search form rendered.
+        expect(b'<form class="search"' in index_bytes,
+               "browse index missing search form")
+        # v2.2: dark-mode CSS present.
+        expect(b"prefers-color-scheme: dark" in index_bytes,
+               "browse index missing dark-mode @media query")
+        # v2.2: subagent grouped — the basic-session has a synthetic subagent
+        # child in the fixture, so the parent's card should declare it.
+        expect(b"subagent" in index_bytes,
+               "browse index missing subagent grouping (expected per fixture)")
         first_sid = next(iter(br_sessions))
         expect(f'/session/{first_sid}'.encode() in index_bytes,
                f"browse index missing server-route href for {first_sid}")
@@ -949,6 +969,18 @@ def main(argv: list[str] | None = None) -> int:
         sess_bytes = br_mod.render_session_html(sess_dir, sess_manifest)
         expect(sess_bytes is not None and b"<script" not in sess_bytes.lower(),
                "browse session render contains a <script> tag or is None")
+        # v2.2: include_raw=True path also works (the ?raw=1 query plumbing).
+        sess_bytes_raw = br_mod.render_session_html(sess_dir, sess_manifest, include_raw=True)
+        expect(sess_bytes_raw is not None and b"raw JSON" in sess_bytes_raw,
+               "include_raw=True render missing raw-JSON toggle")
+
+        step("browse /search returns FTS hits with snippet markup")
+        # The session corpus has 'fixture world' in a tool_result; search for it.
+        search_bytes = br_mod.render_search_html(archive, "fixture")
+        expect(b"<form class=\"search\"" in search_bytes,
+               "search page missing search form")
+        expect(b"search-result" in search_bytes or b"No matches" in search_bytes,
+               "search page has neither results nor a no-results note")
 
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at
