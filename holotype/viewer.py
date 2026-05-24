@@ -71,9 +71,11 @@ _CLAUDE_CODE_META_TYPES = {
     "queue-operation": "queue operation",
     "progress": "progress event",
     "custom-title": "custom title",
+    "ai-title": "AI-generated title",
     "agent-name": "agent name",
     "last-prompt": "last-prompt marker",
     "compact-summary": "compact summary",
+    "permission-mode": "permission mode change",
 }
 
 
@@ -804,7 +806,7 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path,
         ("messages", msg_count if msg_count is not None else "?"),
         ("tokens in / out", f"{tok_in} / {tok_out}" if tok_in is not None else "?"),
         ("wall clock (s)", wall if wall is not None else "?"),
-        ("project path", project or "?"),
+        ("project", project or "?"),
     ]
     if gs:
         meta_rows.append(("project git", f'{gs.get("remote") or "?"} @ '
@@ -949,10 +951,19 @@ def _human_date(iso: str | None) -> str:
 
 
 def _project_basename(project_dir: str | None) -> str:
+    """Last path segment, handling both POSIX paths and Claude Code's
+    dash-encoded form (``-Users-bf-Git-foo`` ↔ ``/Users/bf/Git/foo``)."""
     if not project_dir:
         return ""
-    p = project_dir.rstrip("/").split("/")[-1]
-    return p or project_dir
+    s = project_dir.strip()
+    if "/" in s:
+        return s.rstrip("/").split("/")[-1] or s
+    if s.startswith("-"):
+        # Dash-encoded; the last segment is the trailing dash-separated chunk.
+        parts = [p for p in s.split("-") if p]
+        if parts:
+            return parts[-1]
+    return s
 
 
 def _card_info_line(sess: dict) -> str:
@@ -983,13 +994,20 @@ def _card_info_line(sess: dict) -> str:
     return " • ".join(parts)
 
 
+_DEFAULT_BUNDLE_BANNER = (
+    "Open any session below to read the rendered transcript. Each session "
+    "directory contains the canonical <code>transcript.jsonl</code>, the "
+    "<code>manifest.json</code>, and a <code>view.html</code> regenerated from the JSONL."
+)
+
+
 def render_index(
     bundle_dir: Path,
     bundle_manifest: dict,
     out_path: Path,
     *,
     title: str = "holotype paper bundle",
-    banner: str | None = None,
+    banner: str | None = _DEFAULT_BUNDLE_BANNER,
     href_pattern: str = "{sid}/view.html",
     show_search: bool = False,
     search_query: str = "",

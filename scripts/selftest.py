@@ -551,6 +551,23 @@ def main(argv: list[str] | None = None) -> int:
                f"expected `migrate:` prefix on combined commit: {new_commits[0]}")
         expect("schema v5" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
+        # The downgraded manifest is now back to v5 AND has the new v5 fields
+        # populated from the rebuild. This proves the version-bump backfill
+        # path actually produces the new excerpts for real existing archives,
+        # not just for fresh deposits.
+        post_migrate = json.loads(mig_target.read_text())
+        expect(post_migrate["manifest_version"] == 5,
+               f"post-migration manifest_version: {post_migrate['manifest_version']}")
+        expect("first_user_message_excerpt" in post_migrate,
+               "post-migration manifest missing first_user_message_excerpt key")
+        excerpt = post_migrate.get("first_user_message_excerpt")
+        expect(isinstance(excerpt, str) and excerpt,
+               f"post-migration excerpt is empty/null: {excerpt!r}")
+        # Whichever fixture got picked, its first user message has a known
+        # opener — basic: "What is 2 + 2?"; multi-model: "Pre-compaction
+        # conversation about quantum entanglement."
+        expect("What is 2" in excerpt or "quantum entanglement" in excerpt,
+               f"post-migration excerpt doesn't match either fixture's opener: {excerpt!r}")
 
         step("--workers > 1 (parallel path) produces a clean archive")
         # Run a fresh ingest entirely through the parallel coordinator
@@ -974,13 +991,23 @@ def main(argv: list[str] | None = None) -> int:
         expect(sess_bytes_raw is not None and b"raw JSON" in sess_bytes_raw,
                "include_raw=True render missing raw-JSON toggle")
 
-        step("browse /search returns FTS hits with snippet markup")
-        # The session corpus has 'fixture world' in a tool_result; search for it.
+        step("browse /search returns real FTS hits with snippet highlighting")
+        # 'fixture' appears in the synthetic transcript (tool_use input path
+        # like /tmp/example.txt → 'fixture world' tool result). Demand actual
+        # hits with the snippet <mark> highlighting from FTS5's snippet()
+        # function — not just "either results or a note."
         search_bytes = br_mod.render_search_html(archive, "fixture")
-        expect(b"<form class=\"search\"" in search_bytes,
+        expect(b'<form class="search"' in search_bytes,
                "search page missing search form")
-        expect(b"search-result" in search_bytes or b"No matches" in search_bytes,
-               "search page has neither results nor a no-results note")
+        expect(b"search-result" in search_bytes,
+               "search for 'fixture' returned no .search-result blocks despite "
+               "fixture text being present in the synthetic transcript")
+        expect(b"<mark>" in search_bytes,
+               "search results missing FTS snippet <mark> highlighting")
+        # Empty-query path still renders a usable page.
+        empty_bytes = br_mod.render_search_html(archive, "")
+        expect(b"No matches" in empty_bytes,
+               "empty search query should render the no-matches note")
 
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at

@@ -2,6 +2,28 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-05-24
+
+Closes the gaps from v2.2.0 — visual validation in a real browser, plus the items I admitted I'd shipped without verifying.
+
+### Bug fixes
+
+- **`permission-mode` and `ai-title` are now recognized Claude Code meta record types.** v2.2.0 left these falling through to "(record shape not recognized)" in the viewer. Found 511 of them in a single real session (256 permission-mode + 255 ai-title). Now classified as meta and folded into the leading-meta collapsed block where they belong.
+- **`_project_basename` now handles Claude Code's dash-encoded paths.** Search results were rendering project headers as `-Users-brendenferland-Git-ResistaMet-GUI` because the basename helper only split on `/`. It now treats both POSIX paths (`/Users/brendenferland/Git/foo` → `foo`) and dash-encoded paths (`-Users-brendenferland-Git-foo` → `foo`) correctly.
+- **Session-view header label was inconsistent.** Card UI says "project"; header said "project path". Now both say "project".
+- **Paper-bundle `index.html` rendered with no banner.** v2.2.0's `render_index` refactor parameterized the banner with `banner: str | None = None` default — which dropped the explanatory banner from the paper-bundle path. Restored as the default value so paper bundles still get the "Open any session below to read the rendered transcript…" banner, with the browse server overriding to its own text.
+
+### Selftest
+
+- **Search assertion tightened.** Was: "either there are results or there's a no-results note." Now: demands real `<div class="search-result">` blocks AND `<mark>` highlighting from FTS5's `snippet()` function, plus an empty-query path assertion.
+- **v4→v5 backfill validated end-to-end.** The existing manifest-version-mismatch migration test now also asserts that the post-migration manifest has `first_user_message_excerpt` populated with text matching one of the fixture openers. This is the closed-loop confirmation that existing v4 archives will surface excerpts on cards after their next ingest cycle.
+
+### Visual validation
+
+End-to-end inspection in Chrome against the real 3,056-session archive: title is "holotype — your archive"; cards show project name + human date + tools/thinking badges + output-token signal + secondary id/repo/subagent line; subagent grouping renders (24 `<details>` groups); leading-meta collapsed by default; 194 long tool results collapsed; user prompts styled blue (not dim grey); dark mode renders cleanly under `prefers-color-scheme: dark`; `/search?q=memory` returns 50 results with 103 `<mark>` highlights and basename-displayed project headers.
+
+---
+
 ## [2.2.0] — 2026-05-23
 
 The reader is now usable at archive scale. Three categories of work, motivated by visually inspecting the v2.1.0 reader against a 3,056-session real archive.
