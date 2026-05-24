@@ -2,6 +2,27 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] — 2026-05-24
+
+Closes the perception-of-freshness gap in the reader: when a session is currently being written to, the browse UI says so.
+
+### Added
+
+- **"Live" badge on session cards.** The browse server now stats `manifest.source_path` against `manifest.deposited_at` per session at index-render time. When the source JSONL has been modified since the last deposit, the card gets a `session-card.live` left-border accent and an inline `● live` badge next to the project name. Confirmed against a real archive: my current interactive session (mid-conversation, source mtime ahead of deposit) shows up flagged; idle sessions don't.
+- **Live banner in session views.** When the user clicks into a live session, the rendered view shows an amber banner above the transcript: *"The source file at &lt;path&gt; has been modified since this snapshot was ingested at &lt;timestamp&gt;. The conversation may have grown — the next ingest tick will capture it."* Tells the user explicitly that they're reading a snapshot, not the current state.
+
+The detection is cheap (one `stat()` per session at index-render time, ~300 ms for a 3,000-session archive), localhost-only, and gracefully degrades — missing or unreachable source paths just don't get the live flag rather than erroring.
+
+### Why
+
+[v2.2.1 changelog] honest take: holotype's safety story for growing JSONLs is solid (2-second grace window in `is_live_file()`, `mtime`-around-read in `read_with_stable_check()`, `update:` commits preserve full history), but the user-facing UX gave no signal that a session was still being written. A 30-minute background tick means a 3-hour conversation can be up to 30 min stale in the archive at any moment — without an indicator, the user has no way to know "this is a snapshot" vs "this is final."
+
+### Selftest
+
+Synthetic assertion that bumping a source file's mtime ahead of its `deposited_at` produces both `class="live-badge"` and `session-card live` in the rendered index, plus a `live-banner` with "may have grown" text in the session view.
+
+---
+
 ## [2.2.1] — 2026-05-24
 
 Closes the gaps from v2.2.0 — visual validation in a real browser, plus the items I admitted I'd shipped without verifying.

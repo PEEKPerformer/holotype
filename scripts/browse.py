@@ -87,12 +87,43 @@ _INDEX_FIELDS = (
     "project_dir_decoded", "has_tool_use", "has_thinking",
     "total_input_tokens", "total_output_tokens",
     "first_user_message_excerpt", "last_user_message_excerpt",
+    "source_path", "deposited_at",
 )
+
+
+def _has_growth_since_deposit(manifest: dict) -> bool:
+    """True iff the source JSONL has bytes that aren't yet in the archive.
+
+    A session is "live" in the UX sense when the file the host CLI is
+    appending to (Claude Code's ``~/.claude/projects/<…>.jsonl``, etc.)
+    has been modified after the most recent deposit. The next ingest
+    tick will capture the new content; in the meantime the browse view
+    shows a stale snapshot, and we want the user to know that.
+
+    Returns False if source_path is missing/empty, the file no longer
+    exists, deposited_at is malformed, or the source is no newer than
+    the deposit.
+    """
+    src = manifest.get("source_path")
+    deposited_at = manifest.get("deposited_at")
+    if not src or not deposited_at:
+        return False
+    try:
+        from datetime import datetime
+        dep_epoch = datetime.fromisoformat(str(deposited_at).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return False
+    try:
+        return Path(src).stat().st_mtime > dep_epoch
+    except (OSError, FileNotFoundError):
+        return False
 
 
 def _session_meta_for_index(m: dict) -> dict:
     """Project the manifest down to the fields the renderer cares about."""
-    return {k: m.get(k) for k in _INDEX_FIELDS}
+    out = {k: m.get(k) for k in _INDEX_FIELDS}
+    out["live"] = _has_growth_since_deposit(m)
+    return out
 
 
 def render_index_html(archive: Path, sessions: dict[str, tuple[Path, dict]]) -> bytes:
@@ -148,13 +179,24 @@ def render_session_html(sess_dir: Path, manifest: dict, *, include_raw: bool = F
     transcript_bytes = read_transcript_bytes(sess_dir)
     if transcript_bytes is None:
         return None
+    live_note: str | None = None
+    if _has_growth_since_deposit(manifest):
+        live_note = (
+            "<strong>Live session.</strong> The source file at "
+            f"<code>{_html.escape(str(manifest.get('source_path', '')))}</code> "
+            "has been modified since this snapshot was ingested at "
+            f"<code>{_html.escape(str(manifest.get('deposited_at', '?')))}</code>. "
+            "The conversation may have grown — the next ingest tick will capture it. "
+            "Refresh after that to see new turns."
+        )
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".jsonl", delete=False) as tmp:
         tmp.write(transcript_bytes)
         in_path = Path(tmp.name)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp:
         out_path = Path(tmp.name)
     try:
-        render_session(manifest, in_path, out_path, include_raw=include_raw)
+        render_session(manifest, in_path, out_path, include_raw=include_raw,
+                       live_note=live_note)
         return out_path.read_bytes()
     finally:
         in_path.unlink(missing_ok=True)

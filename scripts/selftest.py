@@ -1009,6 +1009,45 @@ def main(argv: list[str] | None = None) -> int:
         expect(b"No matches" in empty_bytes,
                "empty search query should render the no-matches note")
 
+        step("browse marks sessions as 'live' when source has grown since deposit")
+        # Pick the first session with a source_path that exists on disk and
+        # bump its mtime ahead of the deposit timestamp. The card + the
+        # session view should both surface the live indicator.
+        import os as _os_live
+        target_sid = None
+        for sid, (_, m) in br_sessions.items():
+            sp = m.get("source_path")
+            if sp and Path(sp).exists() and m.get("deposited_at"):
+                target_sid = sid
+                # Make the source path mtime "1 hour after deposit."
+                from datetime import datetime as _dt
+                dep_epoch = _dt.fromisoformat(
+                    str(m["deposited_at"]).replace("Z", "+00:00")
+                ).timestamp()
+                _os_live.utime(sp, (dep_epoch + 3600, dep_epoch + 3600))
+                break
+        expect(target_sid is not None,
+               "no session with a stat-able source_path; can't test live-detection")
+        # Refresh sessions (mtime change doesn't affect manifest, but the
+        # _has_growth_since_deposit check runs at index-render time).
+        live_sessions = br_mod.collect_sessions(archive)
+        live_index_bytes = br_mod.render_index_html(archive, live_sessions)
+        expect(b'class="live-badge"' in live_index_bytes,
+               "index missing live-badge after bumping a source mtime")
+        expect(b"session-card live" in live_index_bytes,
+               "expected session-card.live class on the live-flagged card")
+        # The session view for that session should carry the live banner.
+        live_sess_dir, live_manifest = live_sessions[target_sid]
+        live_view = br_mod.render_session_html(live_sess_dir, live_manifest)
+        expect(live_view is not None and b"live-banner" in live_view,
+               "session view missing live-banner for live-flagged session")
+        expect(b"may have grown" in live_view,
+               "live banner doesn't carry the explanatory text")
+        # Now reset the mtime back so the rest of the selftest is uniform.
+        # (Not strictly necessary, but keeps subsequent steps deterministic.)
+        _os_live.utime(Path(live_manifest["source_path"]),
+                       (dep_epoch - 60, dep_epoch - 60))
+
         step("usage_estimate.py emits parseable JSON from a synthetic source")
         # Monkey-patch the registered source's default paths to point at
         # the test source, then call collect() in-process.

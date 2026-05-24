@@ -522,6 +522,43 @@ footer a { color: var(--muted); }
   margin-left: 1.5rem;
   background: var(--meta-bg);
 }
+.session-card.live {
+  border-left: 3px solid #d97706;
+}
+.live-badge {
+  display: inline-block;
+  font-size: .65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.12);
+  padding: .1rem .4rem;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-left: .4rem;
+}
+@media (prefers-color-scheme: dark) {
+  .live-badge {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.15);
+  }
+  .session-card.live {
+    border-left-color: #fbbf24;
+  }
+}
+.banner.live-banner {
+  background: #fff7ed;
+  border: 1px solid #d97706;
+  color: #7c2d12;
+}
+@media (prefers-color-scheme: dark) {
+  .banner.live-banner {
+    background: #2a1d10;
+    border-color: #d97706;
+    color: #fbbf24;
+  }
+}
 details.subagents {
   margin: -.25rem 0 .35rem 0;
 }
@@ -747,7 +784,8 @@ def _read_transcript_records(transcript_path: Path) -> Iterator[dict]:
 def render_session(manifest: dict, transcript_path: Path, out_path: Path,
                    include_raw: bool = True,
                    collapse_long_tool_results: bool = True,
-                   collapse_leading_meta: bool = True) -> None:
+                   collapse_leading_meta: bool = True,
+                   live_note: str | None = None) -> None:
     """Write ``view.html`` rendering ``transcript_path`` for one session.
 
     ``include_raw`` — embed each record's raw JSON in a ``<details>`` toggle.
@@ -816,6 +854,8 @@ def render_session(manifest: dict, transcript_path: Path, out_path: Path,
         parts.append(f"<span>{_escape(k)}</span><span>{_escape(v)}</span>")
     parts.append("</div></header>")
 
+    if live_note:
+        parts.append(f'<p class="banner live-banner">{live_note}</p>')
     banner_text = (
         "This page is a rendering of <code>transcript.jsonl</code>. The JSONL is "
         "the canonical artifact; this HTML is regenerated from it and is not part "
@@ -1075,14 +1115,20 @@ def render_index(
             bottom.append(_escape(repo))
         if sub_count:
             bottom.append(f"+{sub_count} subagent{'s' if sub_count != 1 else ''}")
+        live_html = (
+            '<span class="live-badge" title="Source file has new content since '
+            'this snapshot; next ingest tick will capture it.">● live</span>'
+            if sess.get("live") else ""
+        )
 
         excerpt = sess.get("first_user_message_excerpt") or ""
         excerpt_html = (
             f'<div class="excerpt">{_escape(excerpt)}</div>' if excerpt else ""
         )
         parts.append(
-            f'<a class="session-card" href="{_escape(href)}">'
-            f"<h2>{_escape(heading)}</h2>"
+            f'<a class="session-card{" live" if sess.get("live") else ""}" '
+            f'href="{_escape(href)}">'
+            f'<h2>{_escape(heading)} {live_html}</h2>'
             f'{excerpt_html}'
             f'<div class="info">{_escape(info)}</div>'
             f'<div class="cardmeta">{" · ".join(bottom)}</div>'
