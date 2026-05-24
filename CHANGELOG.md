@@ -2,6 +2,36 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3] — 2026-05-24
+
+Closes the iCloud-lockfile failure mode that the v2.2.2 "live" badge surfaced on the maintainer's own machine.
+
+### Discovered
+
+Brenden's archive at `~/Documents/holotype-archive/` had the launchd tick failing silently since the v5 backfill ran. Every subsequent tick errored with:
+
+```
+OSError: [Errno 11] Resource deadlock avoided: <archive>/.holotype/.lock
+```
+
+The cause: iCloud's "Desktop & Documents Folders" sync was on, and its lazy fileprovider held the lock file in an unwritable state. The user never knew until the v2.2.2 live badge revealed 5 sessions with 15-hour lag — not because conversations were active, but because the tick was broken.
+
+### SKILL.md changes
+
+- **Wizard Step B now actively refuses iCloud-synced paths.** Detects via `defaults read MobileMeAccounts` for `CLOUDDESKTOP / Enabled = 1` AND the candidate path being under `~/Documents/`, `~/Desktop/`, or `~/Library/Mobile Documents/`. Default suggestion changed from `~/Documents/holotype-archive` to `~/holotype-archive` (top-level home, outside any sync set).
+- **New "Troubleshooting an existing install" section.** When a user reports a frozen archive, the LLM is now instructed to: (1) check `launchctl list` for the job, (2) tail `~/Library/Logs/holotype.err.log` for the EAGAIN/deadlock signature, (3) if found, propose the relocate-out-of-iCloud migration explicitly. Documents the 6-step relocation procedure (uninstall launchd → mv → update pointer → rm stale .lock → reinstall launchd → catch-up ingest).
+- **Important guardrail:** "Do not propose the migration speculatively — confirm both signals first." Moving a multi-GB archive is heavy and the user should know it's the right call.
+
+### Why no code-level enforcement
+
+Detecting iCloud-sync state robustly in Python requires probing `defaults` (macOS-specific), checking xattrs (`com.apple.fileprovider.*`), or watching for the `@` mark on directory listings — none of which is portable. The right place to enforce is in the LLM-driven wizard where natural language judgment is cheap. `scripts/init.py` could add a refusal for macOS users in a future release, but the policy belongs in SKILL.md first.
+
+### No code changes
+
+Selftest unchanged. No version-incompatible behavior. v2.2.2 archives keep working identically — this is pure operator-knowledge.
+
+---
+
 ## [2.2.2] — 2026-05-24
 
 Closes the perception-of-freshness gap in the reader: when a session is currently being written to, the browse UI says so.

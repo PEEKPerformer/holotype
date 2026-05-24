@@ -70,11 +70,26 @@ Record the answers. Use them downstream:
 - **Did NOT check `Python`**: never surface `python scripts/foo.py` as the action; describe the action by what it does ("set up the archive," "back up the existing conversations").
 - **Checked all four**: be terse. Skip the explanations. Use the original wizard's vocabulary freely.
 
-**Step B — Archive location (one question with default).** Has a real cost: disk space, where files live, what backs it up. Ask:
+**Step B — Archive location (one question with default).** Has a real cost: disk space, where files live, what backs it up. Default to `~/holotype-archive` (top-level home, never iCloud-synced). Ask:
 
-> "Where should the archive live on your Mac? (Default: `~/Documents/holotype-archive`)"
+> "Where should the archive live on your Mac? (Default: `~/holotype-archive`)"
 
-Expand `~` to an absolute path. If the user is in `~/UConn_phd/` or another personal research dir, mention that as an alternative default ("...or I can put it next to your research folder at `~/UConn_phd/holotype-archive`"). Do **not** suggest iCloud-synced paths — iCloud's lazy sync corrupts git repos. Do **not** suggest putting it inside an Obsidian vault — Obsidian indexes everything and will choke on the binary `.zst` / `.git` objects.
+Expand `~` to an absolute path. If the user is in `~/UConn_phd/` or another personal research dir, mention that as an alternative ("...or I can put it next to your research folder at `~/UConn_phd/holotype-archive`").
+
+**Actively refuse iCloud-synced paths.** This is not advisory — it's a confirmed failure mode that silently breaks the background ingest job. iCloud's lazy fileprovider holds the archive's `.lock` file in an `EAGAIN/deadlock` state, every `launchd` tick fails with `OSError: [Errno 11] Resource deadlock avoided: …/.lock`, and the user has no idea their archive has been frozen for days (until a "live" badge in the browse UI eventually reveals it). Detect:
+
+```bash
+# 1. Is iCloud Desktop & Documents sync enabled?
+defaults read MobileMeAccounts 2>/dev/null | grep -E 'CLOUDDESKTOP|MOBILE_DOCUMENTS' | grep -q 'Enabled = 1' && echo "iCloud-Docs-sync-on"
+# 2. Does the candidate path resolve under a known iCloud-synced root?
+case "<abs-path>" in
+  "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Library/Mobile Documents"/*) echo "iCloud-path" ;;
+esac
+```
+
+If **both** are true (sync is on AND path is under `~/Documents/`, `~/Desktop/`, or `~/Library/Mobile Documents/`): refuse plainly and suggest `~/holotype-archive`. Don't try to be clever about partial paths or symlinks — just say: *"That folder is synced to iCloud, which silently breaks holotype's background ingest job (the lock file becomes unwritable). Pick somewhere outside `~/Documents/` and `~/Desktop/` — `~/holotype-archive` is the conventional spot."* If only one is true (path is under `~/Documents/` but sync is off, OR sync is on but path is `~/Git/...`), proceed.
+
+Also do **not** suggest putting the archive inside an Obsidian vault — Obsidian indexes everything and will choke on the binary `.zst` / `.git` objects.
 
 **Step C — Backup to GitHub? (one question, both sides named).** Has a real cost on either side. Ask, with the cost of *both* choices stated honestly:
 
@@ -237,6 +252,39 @@ Read these before any operation:
 | Push to the configured remote (explicit, never auto) | confirm with user, then `git -C <archive> push` |
 
 Session IDs are UUID prefixes — typically 8 hex chars are enough to disambiguate.
+
+## Troubleshooting an existing install
+
+If a user invokes the skill and reports that their archive seems frozen or out of date — *"nothing new has been saved in days,"* *"the browse view shows my live session as `live` and won't update,"* *"my conversations from yesterday aren't in the archive"* — diagnose in this order:
+
+**1. Check the launchd job actually exists and is loaded:**
+
+```bash
+launchctl list | grep io.holotype.ingest
+```
+
+If absent, the job got uninstalled (perhaps during repo surgery via `--pause` that was never `--resume`d). Reinstall: `python scripts/install-launchd.py --archive <archive-path>`.
+
+**2. Tail the stderr log for ingest errors:**
+
+```bash
+tail -30 ~/Library/Logs/holotype.err.log
+```
+
+The most common failure mode is `OSError: [Errno 11] Resource deadlock avoided: <archive>/.holotype/.lock`. **This is iCloud's lazy fileprovider holding the lock file in an unwritable state.** It happens when the archive is under `~/Documents/`, `~/Desktop/`, or any `~/Library/Mobile Documents/` path AND `defaults read MobileMeAccounts` shows `CLOUDDESKTOP / Enabled = 1`. The fix is to relocate the archive out of iCloud:
+
+1. `python scripts/install-launchd.py --uninstall`
+2. `mv <icloud-archive-path> ~/holotype-archive`  *(may take a while if iCloud is materializing files — let it finish)*
+3. Update the pointer: `echo ~/holotype-archive > ~/.config/holotype/archive-path`
+4. `rm -f ~/holotype-archive/.holotype/.lock`  *(remove the stuck lock so the new path starts clean)*
+5. `python scripts/install-launchd.py --archive ~/holotype-archive`
+6. Catch-up run: `python scripts/ingest.py --archive ~/holotype-archive`
+
+Do not propose this fix without first confirming both signals (the EAGAIN/deadlock log line AND iCloud-Documents sync on) — moving the archive is a heavy operation and the user should know it's the right call.
+
+**3. If launchd is loaded and logs are clean but nothing is being deposited:**
+
+Check whether sessions are being correctly identified as live but the tick is racing the host CLI. `is_live_file()` skips files modified in the last 2 seconds. A persistently-active session that's written-to every <2s could starve. Workaround: bump the interval back from any longer value to the 1800s default, OR run `python scripts/ingest.py` manually to force a deposit at a quiet moment.
 
 ## Invocation model
 
