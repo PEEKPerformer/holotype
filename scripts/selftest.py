@@ -931,6 +931,23 @@ def main(argv: list[str] | None = None) -> int:
             expect(recomputed == sess["sha256"],
                    f"bundle transcript hash mismatch for {sid}: {recomputed} != {sess['sha256']}")
         expect((bundle_out / "VERIFY.md").exists(), "paper bundle missing VERIFY.md")
+        # Reviewer-oriented README is templated from BUNDLE_MANIFEST metadata
+        # and explicitly framed in journal-reproducibility language.
+        readme_path = bundle_out / "README.md"
+        expect(readme_path.exists(), "paper bundle missing README.md (reviewer guide)")
+        readme_text = readme_path.read_text()
+        expect("LLM session logs" in readme_text,
+               "README.md missing journal-oriented framing")
+        expect("Models used" in readme_text,
+               "README.md missing 'Models used' section")
+        expect("Generation date range" in readme_text,
+               "README.md missing 'Generation date range' section")
+        expect("Selftest paper" in readme_text,
+               "README.md doesn't include the --paper-title passed at bundle time")
+        expect("index.html" in readme_text,
+               "README.md doesn't direct reviewer to index.html")
+        expect("VERIFY.md" in readme_text,
+               "README.md doesn't reference VERIFY.md for hash verification")
 
         step("paper_bundle ships an index.html and per-session view.html (no scripts)")
         index_html = bundle_out / "index.html"

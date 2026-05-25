@@ -2,6 +2,29 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.4] — 2026-05-24
+
+Paper bundles now ship a reviewer-oriented `README.md` at the root, templated from `BUNDLE_MANIFEST` and framed in the language of journal reproducibility policies for LLM-assisted research (the target audience: a Digital Discovery / *Use of large language models in research* reviewer who has never seen holotype).
+
+### Added
+
+- **`scripts/paper_bundle.py` writes `README.md`** alongside the existing `VERIFY.md` + `BUNDLE_MANIFEST.json` + `index.html`. The README is auto-populated with:
+  - Session count and paper title/DOI (if provided)
+  - Unique list of models used across the deposit (deduplicated, sorted, `<synthetic>` sentinel filtered)
+  - Generation date range (earliest first-timestamp to latest last-timestamp across sessions)
+  - Explicit map to journal-required artifacts: *"log files including the inputs and outputs"* → `transcript.jsonl`; *"model identifier"* → `manifest.models`; *"generation date"* → `manifest.first_timestamp` / `last_timestamp`
+  - Instruction to open `index.html` first (the v2.2.0 reader serves the no-LLM reviewer)
+  - Pointer to `VERIFY.md` for hash verification with stock Unix tools
+  - Honest "what this deposit does NOT include" section (external file states, referenced git repos)
+
+The README is the bundle's first-impression artifact when opened on Zenodo or by a peer reviewer. It explains itself without requiring familiarity with the tool.
+
+### Selftest
+
+New assertion that paper bundles include `README.md`, that it carries the journal-oriented framing string, the Models/Generation-date sections, the paper title passed at bundle time, and references to both `index.html` and `VERIFY.md`.
+
+---
+
 ## [2.2.3] — 2026-05-24
 
 Closes the iCloud-lockfile failure mode that the v2.2.2 "live" badge surfaced on the maintainer's own machine.
