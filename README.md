@@ -49,7 +49,7 @@ LLM-driven sessions that drive instruments, perform autonomous analysis, or exec
 ├── scripts/                     # CLI entry points the skill invokes via Bash
 └── tests/                       # fixtures + selftest
 
-~/Documents/holotype-archive/    # the user's archive (created by the wizard)
+~/holotype-archive/    # the user's archive (created by the wizard)
 ├── .holotype/
 │   ├── config.json              # archive config (portable — moves with the archive)
 │   ├── index.sqlite             # derived FTS5 search index (gitignored)
@@ -120,21 +120,21 @@ Invoke the skill explicitly:
 $holotype    # Codex
 ```
 
-The first invocation walks you through the interactive setup wizard (archive location → storage projection + compression choice → remote choice → host-CLI retention → background-tick opt-in → first ingest). Subsequent invocations let you deposit, search, cite, verify, or load context — the host LLM will ask which operation you want.
+The first invocation walks you through a two-question setup wizard (*where should the archive live?* and *back up to a private GitHub repo?*) followed by a tailored summary of everything else it set up on your behalf — compression, signing, retention bump, background ingest job, first deposit. The wizard refuses iCloud-synced paths (which silently break the background job) and adapts its vocabulary based on which technologies you've worked with. Subsequent invocations let you deposit, search, cite, verify, browse, or load context — the host LLM will ask which operation you want.
 
 ### From any shell, without an LLM
 
 Scripts are directly runnable. This is also how the macOS launchd background tick invokes them — no LLM required:
 
 ```bash
-python scripts/init.py --path ~/Documents/holotype-archive --remote-url "" --remote-kind none --compression auto
+python scripts/init.py --path ~/holotype-archive --remote-url "" --remote-kind none --compression auto
 python scripts/usage_estimate.py            # storage projection from your source dirs
 python scripts/ingest.py                    # deposit any new sessions
 python scripts/search.py "ionic gel"        # FTS over the archive
 python scripts/verify.py                    # hash-chain check
 python scripts/cite.py 3f1c4cf7             # bundle one session for citation
 python scripts/paper_bundle.py --sessions a,b,c --out ./zenodo-deposit/ --tarball
-python scripts/install-launchd.py --archive ~/Documents/holotype-archive  # macOS only
+python scripts/install-launchd.py --archive ~/holotype-archive  # macOS only
 ```
 
 The skill is convenience automation over the scripts. The scripts are the engine.
@@ -149,7 +149,7 @@ Invoke `/holotype` in a session-bearing CLI and follow the wizard, or run init d
 
 ```bash
 python scripts/init.py \
-    --path ~/Documents/holotype-archive \
+    --path ~/holotype-archive \
     --remote-url "" --remote-kind none \
     --compression auto \
     --sign-commits           # optional, for high-stakes archives
