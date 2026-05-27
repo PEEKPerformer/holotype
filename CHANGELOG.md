@@ -2,6 +2,23 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.6] — 2026-05-27
+
+CI failure fix for v2.2.5. The new recovery-script test green on the maintainer's machine but red on GitHub Actions runners.
+
+### What broke
+
+The v2.2.5 selftest asserted that `recover_v5_env.py` restores `env.claude_code_version` to whatever value the *first commit* of the manifest's history carried. On the maintainer's machine that's a real string (Claude Code is on PATH; the natural fixture ingest captured it). On bare CI runners Claude Code isn't installed, so the natural first commit had `env.claude_code_version: null` — making the test bail with *"can't test recovery without something to recover."* Host-dependent assumption baked into a deterministic test.
+
+### Fixed
+
+- **`scripts/recover_v5_env.py` now walks the manifest's commit history forward and picks the first commit where `env.claude_code_version` is non-null**, instead of trusting commit-0 unconditionally. Real quality improvement, not just a test fix — handles the edge case where an original deposit's env probe failed but a later deposit succeeded.
+- **`scripts/selftest.py`'s recovery test now plants a known sentinel** (`test-recoverable-9.9.9`) into one commit of the manifest's history, then nulls it, then asserts recovery produces *some* non-null value that's actually present somewhere in the manifest's commit history. Works regardless of whether the runner has Claude Code on PATH.
+
+No code changes outside those two files. No schema changes. No user-visible behavior change for already-recovered archives.
+
+---
+
 ## [2.2.5] — 2026-05-27
 
 A 3-day-uptime health check on the maintainer's own archive revealed that the v2.2.0 `manifest_version` 4→5 backfill had silently overwritten `env.claude_code_version` on 96% of manifests. This release fixes the regression going forward and ships a recovery script that restores the lost fields from git history.

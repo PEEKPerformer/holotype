@@ -1,3 +1,3 @@
 """holotype: forensic-grade archival of agent-CLI sessions for scientific reproducibility."""
 
-__version__ = "2.2.5"
+__version__ = "2.2.6"

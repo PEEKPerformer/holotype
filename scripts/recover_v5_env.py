@@ -51,17 +51,16 @@ def find_archive(explicit: Path | None) -> Path:
     return (Path.home() / "Documents" / "holotype-archive").resolve()
 
 
-def first_commit_for_path(archive: Path, rel_path: str) -> str | None:
-    """Return the SHA of the first commit that introduced `rel_path`."""
+def all_commits_for_path(archive: Path, rel_path: str) -> list[str]:
+    """All commits that touched ``rel_path``, oldest first."""
     r = subprocess.run(
         ["git", "-C", str(archive), "log",
-         "--diff-filter=A", "--reverse", "--format=%H", "--", rel_path],
+         "--reverse", "--format=%H", "--", rel_path],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        return None
-    out = r.stdout.strip().split("\n")
-    return out[0] if out and out[0] else None
+        return []
+    return [c for c in r.stdout.strip().split("\n") if c]
 
 
 def manifest_at_commit(archive: Path, commit: str, rel_path: str) -> dict | None:
@@ -75,6 +74,26 @@ def manifest_at_commit(archive: Path, commit: str, rel_path: str) -> dict | None
         return json.loads(r.stdout)
     except (ValueError, TypeError):
         return None
+
+
+def find_recoverable_env(archive: Path, rel_path: str) -> dict | None:
+    """Walk this manifest's commit history oldest-first; return the env
+    block from the first commit where ``env.claude_code_version`` is a
+    non-empty string. Handles the case where the original deposit's env
+    probe returned None but a later deposit succeeded.
+
+    Returns None if no commit in the manifest's history ever carried a
+    non-null claude_code_version (genuinely unrecoverable).
+    """
+    for sha in all_commits_for_path(archive, rel_path):
+        m = manifest_at_commit(archive, sha, rel_path)
+        if not m:
+            continue
+        env = m.get("env") if isinstance(m.get("env"), dict) else {}
+        cc = env.get("claude_code_version")
+        if isinstance(cc, str) and cc:
+            return env
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,22 +139,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         rel = manifest_path.relative_to(archive).as_posix()
-        first = first_commit_for_path(archive, rel)
-        if not first:
-            no_history += 1
-            continue
-
-        original = manifest_at_commit(archive, first, rel)
-        if not original:
-            no_history += 1
-            continue
-
-        orig_env = original.get("env") if isinstance(original.get("env"), dict) else {}
-        orig_cc = orig_env.get("claude_code_version")
-        if not orig_cc:
-            # The original deposit also lacked it. Genuinely unrecoverable.
+        orig_env = find_recoverable_env(archive, rel)
+        if orig_env is None:
+            # No commit in this manifest's history ever carried a non-null
+            # claude_code_version. Genuinely unrecoverable. (Distinct from
+            # "no git history at all" — that's a separate degenerate case
+            # we can't easily distinguish; lumping both here as "nothing
+            # to recover" is acceptable for the operator-report.)
             nothing_to_recover += 1
             continue
+        orig_cc = orig_env.get("claude_code_version")
 
         # Merge: take the original env wholesale, then preserve any fields
         # the CURRENT env added that the original lacked (e.g. a newer
