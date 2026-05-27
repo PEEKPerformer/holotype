@@ -518,6 +518,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         mig_data = json.loads(mig_target.read_text())
         mig_data["manifest_version"] = 3  # pretend it's a stale schema
+        # Plant a sentinel env.claude_code_version. The post-migration
+        # manifest MUST preserve this value — re-probing env from the
+        # ingest context can't recover a string the host CLI captured
+        # at original-deposit time. This is the regression v2.2.5 fixes.
+        mig_data.setdefault("env", {})["claude_code_version"] = "test-sentinel-9.9.9 (Claude Code)"
+        sentinel_deposited_at = mig_data.get("deposited_at") or "2025-01-01T00:00:00+00:00"
+        mig_data["deposited_at"] = sentinel_deposited_at
         mig_target.write_text(json.dumps(mig_data, indent=2, sort_keys=True) + "\n")
         # Commit the rigged manifest so the next ingest sees it as the prior state.
         subprocess.run(["git", "-C", str(archive), "add", str(mig_target.relative_to(archive))],
@@ -568,6 +575,66 @@ def main(argv: list[str] | None = None) -> int:
         # conversation about quantum entanglement."
         expect("What is 2" in excerpt or "quantum entanglement" in excerpt,
                f"post-migration excerpt doesn't match either fixture's opener: {excerpt!r}")
+        # v2.2.5: pure-migration must PRESERVE env and deposited_at from the
+        # prior manifest, not overwrite them with re-probed values.
+        post_env = post_migrate.get("env") or {}
+        expect(post_env.get("claude_code_version") == "test-sentinel-9.9.9 (Claude Code)",
+               f"migration clobbered env.claude_code_version (lost original value): "
+               f"got {post_env.get('claude_code_version')!r}")
+        expect(post_migrate.get("deposited_at") == sentinel_deposited_at,
+               f"migration clobbered deposited_at: got {post_migrate.get('deposited_at')!r}, "
+               f"expected {sentinel_deposited_at!r}")
+
+        step("recover_v5_env.py heals manifests whose env was lost in a prior migration")
+        # Simulate the v2.2.0-era failure: take a deposited manifest, write
+        # a CURRENT-schema (v5) version of it with env.claude_code_version
+        # set to null (as the broken backfill would have left it). Run the
+        # recovery script. Confirm the null value is replaced with the
+        # value from the FIRST commit that wrote this manifest (the
+        # original deposit), which is what the recovery script walks back to.
+        # First, capture what the original deposit's env actually was.
+        rel_target = str(mig_target.relative_to(archive))
+        first_commit = subprocess.run(
+            ["git", "-C", str(archive), "log", "--diff-filter=A", "--reverse",
+             "--format=%H", "--", rel_target],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip().split("\n")[0]
+        original_manifest_at_first = json.loads(subprocess.run(
+            ["git", "-C", str(archive), "show", f"{first_commit}:{rel_target}"],
+            capture_output=True, text=True, check=True,
+        ).stdout)
+        original_cc = (original_manifest_at_first.get("env") or {}).get("claude_code_version")
+        expect(isinstance(original_cc, str) and original_cc,
+               f"fixture's first-commit manifest lacks env.claude_code_version "
+               f"(can't test recovery without something to recover): {original_cc!r}")
+        # Now break the current manifest.
+        broken = json.loads(mig_target.read_text())
+        broken_env = dict(broken.get("env") or {})
+        broken_env["claude_code_version"] = None
+        broken["env"] = broken_env
+        mig_target.write_text(json.dumps(broken, indent=2, sort_keys=True) + "\n")
+        subprocess.run(["git", "-C", str(archive), "add", rel_target],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(archive), "commit", "-q", "-m",
+                       "test: simulate v5-backfill env-loss on one manifest"],
+                       check=True, capture_output=True)
+        # Run recovery.
+        result = run_script(
+            REPO_ROOT / "scripts" / "recover_v5_env.py",
+            "--archive", str(archive),
+        )
+        expect(result.returncode == 0, f"recover_v5_env failed: {result.stderr}")
+        recovered = json.loads(mig_target.read_text())
+        recovered_cc = (recovered.get("env") or {}).get("claude_code_version")
+        expect(recovered_cc == original_cc,
+               f"recover_v5_env did not restore env.claude_code_version from "
+               f"first commit: got {recovered_cc!r}, expected {original_cc!r}")
+        log_after = subprocess.run(
+            ["git", "-C", str(archive), "log", "--oneline", "-1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        expect("recover:" in log_after,
+               f"expected `recover:` commit after recovery script: {log_after}")
 
         step("--workers > 1 (parallel path) produces a clean archive")
         # Run a fresh ingest entirely through the parallel coordinator

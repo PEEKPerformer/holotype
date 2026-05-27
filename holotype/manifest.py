@@ -329,6 +329,7 @@ def build_manifest(
     compression: str | None = None,
     sha256_compressed: str | None = None,
     project_git_state: dict | None = None,
+    original_deposited_at: str | None = None,
 ) -> SessionManifest:
     """Build a SessionManifest from already-read uncompressed JSONL bytes.
 
@@ -376,7 +377,10 @@ def build_manifest(
         has_thinking=scan["has_thinking"],
         has_compaction=scan["has_compaction"],
         parent_session_id=parent_session_id,
-        deposited_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        deposited_at=(
+            original_deposited_at
+            or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ),
         holotype_version=holotype_version,
         source_path=source_path,
         env=env or {},

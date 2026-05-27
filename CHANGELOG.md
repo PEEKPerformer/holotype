@@ -2,6 +2,48 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.5] — 2026-05-27
+
+A 3-day-uptime health check on the maintainer's own archive revealed that the v2.2.0 `manifest_version` 4→5 backfill had silently overwritten `env.claude_code_version` on 96% of manifests. This release fixes the regression going forward and ships a recovery script that restores the lost fields from git history.
+
+### The regression
+
+When `build_manifest()` re-runs on an existing deposit (which is what a `manifest_version` bump triggers), it was always re-probing env fresh — including `claude_code_version`. From a `launchd`-tick context the probe returns `null` because the binary isn't reachable the way it is at user-invoked deposit time. The fresh `null` then overwrote the real version string the original deposit had captured. Transcript SHA-256 hashes were unchanged (the regression is purely metadata), but the forensic claim about *which version of the host CLI saw this session* was silently zeroed out on every existing session.
+
+Same loss would have repeated on every future `MANIFEST_VERSION` bump unless fixed.
+
+### Fixed forward (`holotype/manifest.py` + `scripts/ingest.py`)
+
+- `build_manifest()` gains an `original_deposited_at: str | None = None` parameter. When supplied, the manifest's `deposited_at` is preserved instead of replaced with `datetime.now()`.
+- `scripts/ingest.py` now detects pure-migration ingests (`prior_sha == new_sha and prior_version != MANIFEST_VERSION`) and:
+  - Preserves `env` from the prior manifest (the original deposit-time env capture)
+  - Preserves `deposited_at` from the prior manifest
+  - Preserves `project_git_state` from the prior manifest when present (was captured closer to session-start)
+- Real content updates (`prior_sha != new_sha`) re-capture env fresh — that env corresponds to the moment of the update, which is the right semantics.
+
+### Recovery (`scripts/recover_v5_env.py`)
+
+New script. For each session manifest in the archive, walks `git log --diff-filter=A --reverse` to find the commit that originally introduced it, extracts the original env block from that commit, and merges any non-null fields back into the current manifest. Idempotent — runs over an already-recovered archive as a no-op. One combined `recover:` commit at the end.
+
+Ran against the maintainer's 3,338-session archive at release time:
+- **2,972 manifests recovered** (env.claude_code_version restored from `null` to e.g. `"2.1.149 (Claude Code)"`)
+- 241 already healthy
+- 116 had original `null` too (env probe failed at original deposit; genuinely unrecoverable)
+- 9 lacked git history (couldn't find the first commit; degenerate sessions)
+
+### Selftest
+
+- Pure-migration test now plants a sentinel `claude_code_version` and `deposited_at` in the pre-migration manifest, then asserts both survive the v3→v5 migration. Catches the regression.
+- New step: run `recover_v5_env.py` against a corrupted manifest (env nulled out and committed) and assert it gets restored to the value from the first commit. Confirms recovery works end-to-end.
+
+### Notes
+
+- No schema bump (still `manifest_version: 5`); only the *contents* of the env block changed.
+- Hash chain unchanged across recovery — `verify.py` still reports `3,338/3,338 verified clean`.
+- Encryption-at-rest on the remote independently re-verified during the same health check: GitHub-stored transcript blobs begin with the `\x00GITCRYPT\x00` magic header followed by AES-encrypted payload. Manifests stay plaintext on the remote (by design, for searchable metadata).
+
+---
+
 ## [2.2.4] — 2026-05-24
 
 Paper bundles now ship a reviewer-oriented `README.md` at the root, templated from `BUNDLE_MANIFEST` and framed in the language of journal reproducibility policies for LLM-assisted research (the target audience: a Digital Discovery / *Use of large language models in research* reviewer who has never seen holotype).

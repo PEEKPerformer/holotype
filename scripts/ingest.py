@@ -269,25 +269,50 @@ def deposit_one(
         if stale.exists():
             stale.unlink()
 
-    env = {
-        "holotype_version": __version__,
-        "claude_code_version": claude_code_version(),
-        "platform": platform_info(),
-    }
+    # If this is a pure schema migration (transcript bytes unchanged but
+    # manifest_version bumped), preserve fields that were captured at the
+    # original deposit time and CANNOT be reconstructed by re-deriving from
+    # the bytes:
+    #   - env (especially env.claude_code_version, which reads as null from
+    #     a launchd-tick context but had a real value at the original
+    #     deposit moment)
+    #   - deposited_at (the manifest was deposited THEN, not now)
+    # Real content updates (sha differs) re-capture env fresh, since the
+    # new env corresponds to the moment of the update.
+    is_pure_migration = (
+        prior_manifest is not None
+        and prior_sha == new_sha
+        and prior_version != MANIFEST_VERSION
+    )
+
+    if is_pure_migration and isinstance(prior_manifest.get("env"), dict) and prior_manifest["env"]:
+        env = dict(prior_manifest["env"])
+        original_deposited_at = prior_manifest.get("deposited_at")
+    else:
+        env = {
+            "holotype_version": __version__,
+            "claude_code_version": claude_code_version(),
+            "platform": platform_info(),
+        }
+        original_deposited_at = None
 
     # Probe the project's git state at deposit time, using the cwd the
     # host CLI recorded (decoded from the project_dir_encoded string).
     # If the source itself recorded a session-start git snapshot (e.g.
     # Codex's session_meta), build_manifest will prefer that — the
-    # deposit-time probe is the fallback.
+    # deposit-time probe is the fallback. For pure migrations, prefer the
+    # prior probe (more accurate to original deposit time) over re-probing.
     deposit_time_git = None
-    from holotype.manifest import project_dir_decoded as _decode
-    decoded = _decode(candidate.project_dir_encoded)
-    if decoded:
-        try:
-            deposit_time_git = git_state_for_path(Path(decoded))
-        except Exception:
-            deposit_time_git = None
+    if is_pure_migration and isinstance(prior_manifest.get("project_git_state"), dict):
+        deposit_time_git = prior_manifest["project_git_state"]
+    else:
+        from holotype.manifest import project_dir_decoded as _decode
+        decoded = _decode(candidate.project_dir_encoded)
+        if decoded:
+            try:
+                deposit_time_git = git_state_for_path(Path(decoded))
+            except Exception:
+                deposit_time_git = None
 
     manifest = build_manifest(
         data,
@@ -302,6 +327,7 @@ def deposit_one(
         compression=compression,
         sha256_compressed=sha_compressed,
         project_git_state=deposit_time_git,
+        original_deposited_at=original_deposited_at,
     )
 
     tmp_manifest = dest_manifest.with_suffix(".json.partial")
