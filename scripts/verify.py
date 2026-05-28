@@ -26,6 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from holotype import ledger
 from holotype.archive import iter_all_sessions
 from holotype.compression import (
     COMPRESSED_TRANSCRIPT,
@@ -125,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Optional UUID prefix to verify a single session.")
     p.add_argument("--archive", type=Path, default=None)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--no-chain", action="store_true",
+                   help="Skip the hash-chain (ledger) walk; verify per-file only.")
     args = p.parse_args(argv)
 
     archive = find_archive(args.archive)
@@ -156,10 +159,29 @@ def main(argv: list[str] | None = None) -> int:
         else:
             n_fail += 1
 
+    # Whole-archive hash-chain verification. The per-session loop above
+    # proves each file matches its OWN manifest — necessary but not
+    # sufficient, since a coordinated edit of a transcript + its manifest is
+    # internally consistent. The chain proves the SET and ORDER of deposits
+    # is intact: nothing inserted, deleted, or substituted. It's a
+    # whole-archive property, so it's skipped for a single-session filter and
+    # when --no-chain is passed. An absent ledger (a pre-ledger archive that
+    # hasn't been ingested since the upgrade) warns rather than fails — the
+    # next ingest bootstraps it, or run scripts/build_ledger.py.
+    chain = None
+    chain_failed = False
+    if not args.no_chain and not args.session_id:
+        if ledger.ledger_path(archive).exists():
+            chain = ledger.verify_chain(archive)
+            chain_failed = not chain["ok"]
+        else:
+            chain = {"absent": True}
+
     if args.json:
         print(json.dumps({"results": results,
                           "summary": {"pass": n_pass, "fail": n_fail,
-                                      "missing_hash": n_missing_hash}}, indent=2))
+                                      "missing_hash": n_missing_hash},
+                          "chain": chain}, indent=2))
     else:
         for r in results:
             status = r["status"]
@@ -181,7 +203,27 @@ def main(argv: list[str] | None = None) -> int:
               f"{f', {n_fail} tampered' if n_fail else ''}"
               f"{f', {n_missing_hash} with missing hash field' if n_missing_hash else ''}")
 
-    if n_fail > 0:
+        if chain is not None:
+            if chain.get("absent"):
+                print("  CHAIN   not present (pre-ledger archive — run "
+                      "scripts/build_ledger.py or re-ingest to seal it)")
+            elif chain["ok"]:
+                print(f"  CHAIN OK  {chain['length']} link(s), "
+                      f"head {chain['head'][:12]}…")
+            else:
+                if chain["broken_at"] is not None:
+                    print(f"  CHAIN BROKEN at seq {chain['broken_at']} "
+                          f"(link does not match its predecessor)")
+                if chain["orphans"]:
+                    print(f"  CHAIN ORPHANS: {len(chain['orphans'])} on-disk "
+                          f"deposit(s) not recorded in the ledger:")
+                    for sid in chain["orphans"][:10]:
+                        print(f"          {sid}")
+                if chain["missing"]:
+                    print(f"  CHAIN note: {len(chain['missing'])} ledger "
+                          f"entr(ies) have no on-disk session (deletion?).")
+
+    if n_fail > 0 or chain_failed:
         return 1
     if n_pass == 0 and not args.session_id:
         sys.stderr.write("holotype: no sessions to verify\n")

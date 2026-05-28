@@ -2,6 +2,47 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — 2026-05-28
+
+The archive's "hash chain" is now a real chain. Until this release, "hash chain" named an aspiration: each `manifest.json` carried the SHA-256 of its own transcript, and `verify.py` checked each file against its *own* manifest. That proves per-file content integrity but binds nothing across deposits — a coordinated edit of a transcript *and* its manifest is internally consistent and passed `verify.py` clean. The only thing recording the set and order of deposits was git's commit DAG, which a self-contained `paper_bundle` `.tar.gz` (shipped with no `.git`) doesn't carry. So a reviewer holding a bundle could confirm self-consistency but not that nothing had been inserted, deleted, or substituted.
+
+This release adds an append-only, self-contained **hash-chained ledger** and makes the term literal.
+
+### The ledger (`holotype/ledger.py`)
+
+`.holotype/ledger.jsonl` is a transparency log: one line per *content event* (a new deposit or a content update), each line committing to the previous line's `chain_hash`. The tip — the **chain head** — is a single 64-hex value summarizing the entire deposit history. Publish it in a Data Availability Statement / Zenodo record and anyone can later confirm a bundle reaches that head.
+
+- **One global ledger, not a per-manifest prev-hash.** Sessions grow (append-only logs) and manifests are re-derived on schema bumps; an in-manifest prev-hash would force rewriting every downstream manifest on any append — colliding with the 2 GiB pack ceiling v2.3.0 fought. A separate log appends one link per event and never rewrites history.
+- **Links hash content identity only** (`prev`, `seq`, `source`, `session_id`, `sha256`, `deposited_at`) — never volatile/derived manifest fields. So a pure schema migration (transcript bytes unchanged) produces **zero** new links and never perturbs the chain. Migrations stay manifest-only and cheap, exactly as in v2.3.0.
+- The genesis hash is domain-separated over the archive's `created_at`, so a chain lifted from another archive can't be grafted on and still verify.
+
+### Wiring (`scripts/ingest.py`)
+
+A `LedgerWriter` is constructed under the existing ingest flock and reused across the drain loop. Each content-changed deposit appends its link in the single serialized commit step (`_drain_result`) and the link is staged into the *same* git commit as the deposit, so git's DAG and the ledger advance atomically. Steady-state, bulk-initial, and the auto-chunked bulk path are all covered. Pre-ledger archives are bootstrapped automatically on the next ingest (built from current on-disk deposits, then committed) so no archive is ever left without one.
+
+### `verify.py` makes its title true
+
+After the per-file pass, `verify.py` walks the ledger and reports `CHAIN OK` / `CHAIN BROKEN at seq N`, plus **orphans** (on-disk deposits with no recorded link — the co-edit attack) and **missing** entries. It exits non-zero on a broken chain or an orphan. `--no-chain` opts out; an absent ledger warns rather than fails (the next ingest seals it). New `scripts/build_ledger.py` is the explicit (re)build/seal entry point — deterministic order `(deposited_at, session_id)`, idempotent, never rewrites a healthy live ledger.
+
+### Self-verifying bundles (`scripts/paper_bundle.py`)
+
+Every bundle now ships the full `ledger.jsonl` and records the `chain_head` in `BUNDLE_MANIFEST.json` (schema v2). The rewritten `VERIFY.md` documents two independent layers — per-file integrity (`shasum`/`jq`) and a stdlib-`python3` chain walk to the published head — and states plainly what each does and doesn't prove. This turns a bundle from "internally self-consistent" into "self-verifying against a published anchor," without the upstream repo.
+
+### Why this matters for the science
+
+The whole point of holotype is that a reviewer can trust the provenance of an LLM-assisted result. Per-file hashing was necessary but not sufficient for that claim; the chain closes the gap that mattered most for the publication path.
+
+### Tests
+
+- **First real unit-test file: `tests/test_ledger.py`** (stdlib `unittest`, run in CI alongside the e2e). Table-driven coverage of link determinism, genesis derivation, and `verify_chain` detecting a flipped sha256, inserted link, deleted link, broken prev pointer, and an orphan on-disk deposit.
+- `scripts/selftest.py` adds end-to-end chain assertions: a link per content event (3 deposits + 1 update), first link points at genesis, head stable across a no-op ingest, a pure migration appends zero links, and the headline demonstration — a co-edited transcript+manifest passes `--no-chain` per-file verification but is caught as an orphan (exit 1).
+
+### Migration
+
+The first ingest after upgrade bootstraps the ledger from your existing deposits and commits it (deterministic order; the true historical order already lives in git — this is a forward-looking seal checkpoint). No transcript bytes change. Alternatively run `python scripts/build_ledger.py` once, then `python scripts/verify.py` to confirm `CHAIN OK`.
+
+---
+
 ## [2.3.0] — 2026-05-28
 
 Idle ingest ticks no longer re-read and re-hash the entire archive. A no-op tick on the maintainer's 4.8 GB / ~3,380-session archive dropped from ~10 s of full-corpus hashing to a stat sweep, and tick cost is now decoupled from archive size. The content SHA-256 remains the integrity authority — this is a latency optimization with an added soundness backstop, not a weakening of the forensic guarantee.

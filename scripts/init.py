@@ -33,6 +33,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from holotype import ledger  # noqa: E402
+
 ARCHIVE_FORMAT_VERSION = 1
 HOLOTYPE_SUBDIR = ".holotype"
 CONFIG_FILENAME = "config.json"
@@ -356,6 +359,14 @@ def write_config(
         },
         "verification": {
             "hash_algorithm": "sha256",
+            # The append-only hash-chain ledger. One link per content event;
+            # its head is the archive's single tamper-evidence anchor. See
+            # holotype/ledger.py. Rebuildable from on-disk deposits via
+            # scripts/build_ledger.py if ever lost.
+            "ledger": {
+                "version": ledger.LEDGER_VERSION,
+                "file": ledger.LEDGER_RELPATH,
+            },
         },
     }
     cfg_dir = archive / HOLOTYPE_SUBDIR
@@ -659,6 +670,11 @@ def init_archive(args: argparse.Namespace) -> int:
     write_verify_md(archive)
     write_archive_gitignore(archive)
     (archive / "sessions").mkdir(exist_ok=True)
+    # Seed an empty hash-chain ledger so the file is tracked from genesis;
+    # the first ingest appends its first link on top. (config.json is already
+    # written above, so genesis_hash is well-defined.)
+    if not ledger.ledger_path(archive).exists():
+        ledger.write_ledger(archive, [])
 
     run(["git", "add", "."], cwd=archive)
 

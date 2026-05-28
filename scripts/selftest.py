@@ -35,6 +35,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 
+sys.path.insert(0, str(REPO_ROOT))
+from holotype import ledger  # noqa: E402
+
 
 class TestFailure(AssertionError):
     pass
@@ -335,6 +338,60 @@ def main(argv: list[str] | None = None) -> int:
         result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
         expect(result.returncode == 0, "verify.py still failing after restore")
 
+        step("hash chain: ledger exists, verifies, and has a link per content event")
+        ledger_file = archive / ledger.LEDGER_RELPATH
+        expect(ledger_file.exists(), "ledger.jsonl was not created during ingest")
+        chain = ledger.verify_chain(archive)
+        expect(chain["ok"], f"verify_chain not ok: {chain}")
+        # 3 deposits (2 top-level + 1 subagent) + 1 update from the mutated
+        # fixture above = 4 links. First link's prev is genesis.
+        events = [e["event"] for e in ledger.read_entries(archive)]
+        expect(len(events) == 4, f"expected 4 chain links, got {len(events)}: {events}")
+        expect(events.count("deposit") == 3 and events.count("update") == 1,
+               f"expected 3 deposit + 1 update events, got {events}")
+        expect(ledger.read_entries(archive)[0]["prev"] == ledger.genesis_hash(archive),
+               "first chain link does not point at genesis")
+
+        step("hash chain: verify.py reports CHAIN OK and head is stable across a no-op")
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect("CHAIN OK" in result.stdout, f"verify.py missing CHAIN OK:\n{result.stdout}")
+        head_before = ledger.head(archive)
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(archive), "--source", str(source),
+        )
+        expect("new=0" in result.stdout, f"expected no-op ingest:\n{result.stdout}")
+        expect(ledger.head(archive) == head_before,
+               "chain head moved across a no-op ingest (spurious append)")
+
+        step("hash chain: co-edited transcript+manifest passes per-file but is caught as an orphan")
+        # The attack the chain exists to defeat: edit a transcript AND its
+        # manifest's sha256 so per-file verification stays internally
+        # consistent. The new sha was never chained -> flagged as an orphan.
+        orphan_tx = sorted((archive / "sessions").rglob("transcript.jsonl"))[0]
+        orphan_manifest = orphan_tx.parent / "manifest.json"
+        orig_tx = orphan_tx.read_bytes()
+        orig_mf = orphan_manifest.read_text()
+        new_bytes = orig_tx + b'{"smuggled":true}\n'
+        orphan_tx.write_bytes(new_bytes)
+        mf = json.loads(orig_mf)
+        mf["sha256"] = hashlib.sha256(new_bytes).hexdigest()
+        orphan_manifest.write_text(json.dumps(mf, indent=2, sort_keys=True) + "\n")
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect(result.returncode == 1, "verify.py did not exit 1 on a co-edited (orphan) deposit")
+        expect("ORPHAN" in result.stdout.upper(),
+               f"verify.py missed the orphan deposit:\n{result.stdout}")
+        # Per-file verification alone is fooled — prove the gap is real.
+        per_file_only = run_script(
+            REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive), "--no-chain",
+        )
+        expect(per_file_only.returncode == 0,
+               "per-file verify should pass the co-edit; chain is what catches it")
+        orphan_tx.write_bytes(orig_tx)
+        orphan_manifest.write_text(orig_mf)
+        result = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(archive))
+        expect(result.returncode == 0, "verify.py still failing after orphan restore")
+
         step("search.py returns matches for a known term")
         result = run_script(
             REPO_ROOT / "scripts" / "search.py", "entanglement",
@@ -541,6 +598,11 @@ def main(argv: list[str] | None = None) -> int:
             capture_output=True, text=True, check=True,
         ).stdout
         before_count = len(before_log.strip().split("\n"))
+        # A pure manifest-version migration changes no transcript bytes, so it
+        # must append ZERO hash-chain links — the chain tracks content events,
+        # not schema bumps.
+        chain_head_before_mig = ledger.head(archive)
+        chain_len_before_mig = len(ledger.read_entries(archive))
 
         result = run_script(
             REPO_ROOT / "scripts" / "ingest.py",
@@ -550,6 +612,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             print(result.stdout)
         expect(result.returncode == 0, f"migration ingest failed: {result.stderr}")
+        expect(ledger.head(archive) == chain_head_before_mig
+               and len(ledger.read_entries(archive)) == chain_len_before_mig,
+               "pure manifest migration appended a hash-chain link (it must not)")
 
         after_log = subprocess.run(
             ["git", "-C", str(archive), "log", "--oneline"],

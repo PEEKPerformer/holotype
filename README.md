@@ -21,7 +21,7 @@ LLM-driven sessions that drive instruments, perform autonomous analysis, or exec
 ## Design philosophy (non-negotiable)
 
 1. **Forensic completeness.** Tool calls, tool results, thinking blocks, system reminders, hook outputs, image attachments — every byte preserved verbatim.
-2. **Provenance via hash chain.** Each session has a SHA-256 manifest. Manifests reference the git commit that introduced them. Modification after deposit breaks the chain and is detectable by `scripts/verify.py` or by stock Unix tools.
+2. **Provenance via a real hash chain.** Each session has a SHA-256 manifest (per-file content integrity). On top of that, an append-only hash-chained ledger (`.holotype/ledger.jsonl`) records one link per content event, each committing to the previous link's hash — so the *set and order* of deposits is tamper-evident, not just each file in isolation. The chain **head** is a single 64-hex anchor you cite in a Data Availability Statement. `scripts/verify.py` walks both layers; insertion, deletion, or a co-edited transcript+manifest is caught as a broken chain or an orphan.
 3. **Git is the archive substrate.** Not SQLite, not a tarball. Git's content-addressable storage, commit history, and signed tags *are* the provenance system. We do not reinvent them.
 4. **Environment capture.** Each manifest records the host CLI version, model IDs that appeared, OS/platform, the project repo's git state, wall-clock time, and aggregated LLM token usage.
 5. **Append-only by design.** Once deposited, a session is immutable. Re-ingesting the same session is a no-op (SHA-256 dedup).
@@ -35,7 +35,7 @@ LLM-driven sessions that drive instruments, perform autonomous analysis, or exec
 - **Optional `git-crypt` encryption** before push, for backup remotes that shouldn't see transcript content. Manifests stay plaintext; the data-loss risk of key loss is surfaced loudly at init.
 - **Optional GPG-signed deposit commits** for tamper-evident provenance.
 - **Reproducibility manifest** capturing project repo git state, wall-clock duration, model IDs, and per-session token totals.
-- **Paper bundles** via `scripts/paper_bundle.py` — extract a curated session subset for Zenodo deposit, with a master `BUNDLE_MANIFEST.json`, per-session self-contained `view.html`, top-level `index.html`, and tarball + SHA-256 sidecar.
+- **Self-verifying paper bundles** via `scripts/paper_bundle.py` — extract a curated session subset for Zenodo deposit, with a master `BUNDLE_MANIFEST.json` (recording the chain head), the full `ledger.jsonl`, per-session self-contained `view.html`, top-level `index.html`, and tarball + SHA-256 sidecar. The shipped `VERIFY.md` walks a reviewer through per-file *and* hash-chain verification — to the published head, with no upstream repo required.
 - **In-browser archive viewer** via `scripts/browse.py` — a stdlib HTTP server on localhost that renders the index and each session on demand. Zero disk cache. Session cards lead with project name + human date + first-user-message excerpt; subagents nest under their parent; the index has a full-text-search box backed by SQLite FTS5; dark mode follows the OS preference. Lets a non-programmer answer the first real post-setup question ("how do I look at my saved chats?") without touching the CLI.
 - **Parallel ingest pipeline** with auto-chunking and per-chunk push so encrypted multi-GB archives don't trip GitHub's pack-size limit.
 - **Background tick** (macOS launchd, Linux systemd unit template) for catch-up ingests on long-running sessions.
@@ -131,7 +131,8 @@ python scripts/init.py --path ~/holotype-archive --remote-url "" --remote-kind n
 python scripts/usage_estimate.py            # storage projection from your source dirs
 python scripts/ingest.py                    # deposit any new sessions
 python scripts/search.py "ionic gel"        # FTS over the archive
-python scripts/verify.py                    # hash-chain check
+python scripts/verify.py                    # per-file + hash-chain check
+python scripts/build_ledger.py              # (re)build/seal the hash chain (rarely needed; ingest auto-bootstraps)
 python scripts/cite.py 3f1c4cf7             # bundle one session for citation
 python scripts/paper_bundle.py --sessions a,b,c --out ./zenodo-deposit/ --tarball
 python scripts/install-launchd.py --archive ~/holotype-archive  # macOS only

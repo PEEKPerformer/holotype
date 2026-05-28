@@ -38,6 +38,9 @@ jobs:
           git config --global user.email "selftest@holotype.invalid"
           git config --global user.name "holotype selftest"
 
+      - name: Run unit tests
+        run: python tests/test_ledger.py
+
       - name: Run selftest
         run: python scripts/selftest.py --verbose
 

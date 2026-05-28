@@ -53,6 +53,7 @@ from holotype.index import (
     session_indexed,
     upsert_session,
 )
+from holotype import ledger
 from holotype.manifest import MANIFEST_VERSION, build_manifest
 from holotype.sources import ALL_SOURCES, source_by_name
 from holotype.sources.base import DepositCandidate, Source
@@ -512,6 +513,12 @@ def commit_deposit(
     for tf in ("transcript.jsonl", "transcript.jsonl.zst"):
         if (sess_dir / tf).exists():
             paths_to_add.append(f"{rel}/{tf}")
+    # The hash-chain link for this deposit was appended to the ledger by the
+    # caller before this commit. Stage it into the SAME commit so git's DAG
+    # and the ledger advance atomically. Always present once any deposit has
+    # happened; guard for the (impossible-in-practice) missing case.
+    if (archive / ledger.LEDGER_RELPATH).exists():
+        paths_to_add.append(ledger.LEDGER_RELPATH)
     run_git(archive, "add", *paths_to_add)
     diff = run_git(archive, "diff", "--cached", "--quiet")
     if diff.returncode == 0:
@@ -552,6 +559,10 @@ def commit_bulk_initial(
     CHUNK = 500
     for i in range(0, len(rels), CHUNK):
         run_git(archive, "add", *rels[i:i + CHUNK])
+    # All bulk-initial links were appended to the ledger during the drain
+    # loop; stage it into this combined commit.
+    if (archive / ledger.LEDGER_RELPATH).exists():
+        run_git(archive, "add", ledger.LEDGER_RELPATH)
     diff = run_git(archive, "diff", "--cached", "--quiet")
     if diff.returncode == 0:
         return None
@@ -701,6 +712,32 @@ def _parallel_worker_unpack(args_tuple):
     )
 
 
+def _ledger_append_for(
+    ledger_writer, archive: Path, source_cls: type[Source],
+    candidate: DepositCandidate, status: str,
+) -> None:
+    """Append this content event's hash-chain link.
+
+    Reads the sha256/deposited_at from the manifest the worker just wrote
+    (it's on disk by the time the coordinator drains the result). Must run
+    BEFORE the commit so the link is staged into the same commit.
+    """
+    if ledger_writer is None:
+        return
+    manifest_path = session_archive_dir(archive, candidate) / "manifest.json"
+    try:
+        m = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    ledger_writer.append(
+        source=source_cls.name,
+        session_id=m.get("session_id") or candidate.session_id,
+        sha256=m.get("sha256", ""),
+        deposited_at=m.get("deposited_at", ""),
+        event="deposit" if status == "new" else "update",
+    )
+
+
 def _drain_result(
     result: dict,
     source_cls: type[Source],
@@ -714,6 +751,7 @@ def _drain_result(
     bulk_fts_rows: list,
     sign_commits: bool,
     is_bulk_initial: bool,
+    ledger_writer=None,
 ) -> None:
     """Consume one worker result and drive the SQLite + git serial path.
 
@@ -738,6 +776,10 @@ def _drain_result(
     transcript_changed = result["transcript_changed"]
 
     if transcript_changed:
+        # Append the hash-chain link first (the commit, below, stages the
+        # ledger). Content change -> exactly one link; migrations never reach
+        # this branch, so they never perturb the chain.
+        _ledger_append_for(ledger_writer, archive, source_cls, candidate, status)
         if is_bulk_initial:
             update_index(
                 conn, archive, source_cls, candidate, git_commit=None,
@@ -894,6 +936,27 @@ def main(argv: list[str] | None = None) -> int:
         INDEX_COMMIT_BATCH = 50
         pending_since_commit = 0
 
+        # Hash-chain ledger. For a pre-ledger archive (deposits exist but no
+        # ledger), bootstrap one from the current on-disk state and commit it
+        # before any new links append — otherwise every existing deposit
+        # would look like an unrecorded orphan. Fresh archives just start at
+        # genesis. The writer is reused across the drain loop; dry-run never
+        # touches it.
+        ledger_writer = None
+        if not args.dry_run:
+            if not (archive / ledger.LEDGER_RELPATH).exists():
+                boot = ledger.backfill_entries(archive)
+                if boot:
+                    ledger.write_ledger(archive, boot)
+                    run_git(archive, "add", ledger.LEDGER_RELPATH)
+                    if run_git(archive, "diff", "--cached", "--quiet").returncode != 0:
+                        cargs = ["commit", "-m",
+                                 "ledger: bootstrap hash chain from existing deposits"]
+                        if sign_commits:
+                            cargs.insert(1, "-S")
+                        run_git(archive, *cargs)
+            ledger_writer = ledger.LedgerWriter(archive)
+
         # Three buckets:
         # - migrations[]: manifest-only refreshes (transcript bytes
         #   unchanged) → one combined `migrate:` commit at end of cycle.
@@ -962,6 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
                             result, cls, candidate, conn, archive,
                             counts, committed, bulk_initial, migrations,
                             bulk_fts_rows, sign_commits, args.bulk_initial,
+                            ledger_writer=ledger_writer,
                         )
                         # SQLite commit cadence — same as serial path.
                         if result["status"] in ("new", "updated"):
@@ -988,6 +1052,9 @@ def main(argv: list[str] | None = None) -> int:
                         continue
 
                     if transcript_changed:
+                        _ledger_append_for(
+                            ledger_writer, archive, source_cls, candidate, status
+                        )
                         if args.bulk_initial:
                             update_index(
                                 conn, archive, source_cls, candidate, git_commit=None,
@@ -1017,6 +1084,11 @@ def main(argv: list[str] | None = None) -> int:
             # Final batch flush.
             if pending_since_commit:
                 conn.commit()
+
+        # All ledger appends for this cycle are flushed+fsync'd; close the
+        # handle before the bulk commits (which stage the file) run.
+        if ledger_writer is not None:
+            ledger_writer.close()
 
         # Bulk-initial commit(s). When the projected pack would exceed
         # --max-pack-gib, auto-chunk by project directory into N
@@ -1080,6 +1152,10 @@ def main(argv: list[str] | None = None) -> int:
                     CHUNK_ADD = 500
                     for j in range(0, len(chunk), CHUNK_ADD):
                         run_git(archive, "add", *chunk[j:j + CHUNK_ADD])
+                    # The ledger covers the whole batch; stage it in the
+                    # first chunk commit so it lands exactly once.
+                    if ci == 1 and (archive / ledger.LEDGER_RELPATH).exists():
+                        run_git(archive, "add", ledger.LEDGER_RELPATH)
                     diff = run_git(archive, "diff", "--cached", "--quiet")
                     if diff.returncode == 0:
                         continue

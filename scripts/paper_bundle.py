@@ -37,6 +37,7 @@ from textwrap import dedent
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from holotype import ledger
 from holotype.archive import resolve_session_by_prefix
 from holotype.compression import read_transcript_bytes
 from holotype.viewer import render_index, render_session
@@ -175,59 +176,99 @@ def write_reviewer_readme(out_dir: Path, bundle_manifest: dict) -> None:
     (out_dir / "README.md").write_text(body)
 
 
-def write_verify_md(out_dir: Path) -> None:
-    (out_dir / "VERIFY.md").write_text(
-        dedent(
-            """\
-            # Verifying this paper bundle (no Claude required)
-
-            This directory bundles one or more holotype-archived LLM sessions
-            referenced by a paper. Each subdirectory is one session. Every
-            session ships its raw ``transcript.jsonl`` in plain (uncompressed)
-            JSONL so verification needs only stock Unix tools.
-
-            ## To verify every session at once
-
-            ```bash
-            jq -r '.sessions[] | "\\(.sha256)  \\(.session_id)/transcript.jsonl"' \\
-                BUNDLE_MANIFEST.json | shasum -a 256 -c -
-            ```
-
-            Each session's per-file ``manifest.json`` carries the same
-            ``sha256`` so per-session verification is also possible:
-
-            ```bash
-            cd <session-id>/
-            recomputed=$(shasum -a 256 transcript.jsonl | awk '{print $1}')
-            recorded=$(jq -r '.sha256' manifest.json)
-            [ "$recomputed" = "$recorded" ] && echo "OK" || echo "MISMATCH"
-            ```
-
-            ## What this bundle includes per session
-
-            - ``transcript.jsonl`` — verbatim JSONL the host CLI wrote
-            - ``manifest.json`` — SHA-256, env capture, model IDs, timestamps,
-              token totals, and (when available) the project repo's git
-              state at session-start
-            - ``cite.txt`` — one-screen citation block
-            - ``view.html`` — self-contained HTML rendering of the
-              transcript for browser-based review (regenerated from
-              the JSONL; not part of the hash chain)
-
-            ## What this bundle does NOT include
-
-            - Files the LLM read or wrote outside its own transcript
-            - The state of any external git repos referenced in the
-              transcripts — those are recorded by commit hash in each
-              manifest's ``project_git_state`` field, where the host CLI
-              captured one. Reproduce by ``git checkout`` of the
-              corresponding repo at the recorded commit.
-
-            The bundle's own integrity is rooted in ``BUNDLE_MANIFEST.json``
-            and (if produced) the sibling ``<bundle>.tar.gz.sha256``.
-            """
-        )
+def write_verify_md(out_dir: Path, chain_head: str | None) -> None:
+    head_line = (
+        f"The published integrity anchor for this bundle is the **chain head**:\n\n"
+        f"    {chain_head}\n\n"
+        f"It should also appear in the paper's Data Availability Statement (and,\n"
+        f"if deposited, the Zenodo record). Matching it is what ties this bundle\n"
+        f"to a specific, timestamped point in the archive's history.\n"
+        if chain_head
+        else "This bundle was produced from an archive without a hash-chain "
+             "ledger; only per-file integrity can be checked.\n"
     )
+    part1 = dedent(
+        """\
+        # Verifying this paper bundle (no Claude, no holotype install required)
+
+        This directory bundles one or more holotype-archived LLM sessions
+        referenced by a paper. Each subdirectory is one session, shipping its
+        raw ``transcript.jsonl`` in plain (uncompressed) JSONL. Verification
+        has two independent layers.
+
+        ## Layer 1 — per-file integrity (does each transcript match its hash?)
+
+        ```bash
+        jq -r '.sessions[] | "\\(.sha256)  \\(.session_id)/transcript.jsonl"' \\
+            BUNDLE_MANIFEST.json | shasum -a 256 -c -
+        ```
+
+        This proves each transcript's bytes are unaltered relative to its own
+        manifest. It does NOT, on its own, prove the *set* of sessions is
+        complete or that none was substituted — a matching transcript+manifest
+        pair is internally consistent whether or not it was ever really
+        deposited. That is what Layer 2 establishes.
+
+        ## Layer 2 — the hash chain (is the deposit set & order intact?)
+
+        """
+    )
+    part2 = dedent(
+        """\
+
+        ``ledger.jsonl`` is an append-only transparency log: one line per
+        content event, each line committing to the previous line's hash.
+        Walk it with stock ``python3`` (stdlib only) and confirm (a) every
+        link recomputes, (b) the walk ends at the published head, and (c)
+        each session you hold is a recorded link:
+
+        ```bash
+        python3 - <<'PY'
+        import hashlib, json
+        FIELDS = ("prev","seq","source","session_id","sha256","deposited_at")
+        entries = [json.loads(l) for l in open("ledger.jsonl") if l.strip()]
+        bundle = json.load(open("BUNDLE_MANIFEST.json"))
+        prev = entries[0]["prev"] if entries else ""   # genesis
+        recorded = {}
+        for i, e in enumerate(entries):
+            pre = "\\n".join({**e, "seq": str(e["seq"])}[f] for f in FIELDS)
+            h = hashlib.sha256(pre.encode()).hexdigest()
+            assert e["seq"] == i and e["prev"] == prev and e["chain_hash"] == h, \\
+                f"chain broken at link {i}"
+            recorded.setdefault(e["session_id"], set()).add(e["sha256"])
+            prev = e["chain_hash"]
+        head = entries[-1]["chain_hash"] if entries else prev
+        assert head == bundle["chain_head"], "head != published anchor"
+        for s in bundle["sessions"]:
+            assert s["sha256"] in recorded.get(s["session_id"], set()), \\
+                f"session {s['session_id']} not recorded in the chain"
+        print("CHAIN OK — head", head[:16], "+", len(entries), "links")
+        PY
+        ```
+
+        Together: Layer 1 proves content integrity; Layer 2 proves the set
+        and order are intact and anchored to the published head. The head
+        plus the upstream repo's signed commit (or the Zenodo deposit
+        timestamp) is what establishes "unaltered since publication."
+
+        ## What this bundle includes per session
+
+        - ``transcript.jsonl`` — verbatim JSONL the host CLI wrote
+        - ``manifest.json`` — SHA-256, env capture, model IDs, timestamps,
+          token totals, and (when available) the project repo's git state
+        - ``cite.txt`` — one-screen citation block
+        - ``view.html`` — self-contained HTML rendering (regenerated from
+          the JSONL; not itself part of the hash chain)
+
+        ## What this bundle does NOT include
+
+        - Files the LLM read or wrote outside its own transcript
+        - The state of external git repos referenced in the transcripts —
+          recorded by commit hash in each manifest's ``project_git_state``;
+          reproduce by ``git checkout`` of that repo at the recorded commit.
+        """
+    )
+    (out_dir / "VERIFY.md").write_text(part1 + head_line + part2)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -319,10 +360,25 @@ def main(argv: list[str] | None = None) -> int:
             "project_git_state": manifest.get("project_git_state"),
         })
 
+    # Ship the FULL hash-chain ledger so the bundle is self-verifying: a
+    # reviewer can walk it to the recorded head (proving the deposit set/order
+    # is intact) and confirm each bundled session's sha256 is a recorded link
+    # (proving it wasn't substituted) — all without the upstream git repo. The
+    # head is the single value a paper cites as its integrity anchor.
+    chain_head = None
+    chain_length = 0
+    if ledger.ledger_path(archive).exists():
+        shutil.copy(ledger.ledger_path(archive), out_dir / "ledger.jsonl")
+        entries = ledger.read_entries(archive)
+        chain_length = len(entries)
+        chain_head = ledger.head(archive, entries=entries)
+
     bundle_manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "produced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "archive_commit": archive_commit(archive),
+        "chain_head": chain_head,
+        "chain_length": chain_length,
         "paper_title": args.paper_title or None,
         "paper_doi": args.paper_doi or None,
         "session_count": len(sessions_meta),
@@ -331,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     (out_dir / "BUNDLE_MANIFEST.json").write_text(
         json.dumps(bundle_manifest, indent=2) + "\n"
     )
-    write_verify_md(out_dir)
+    write_verify_md(out_dir, chain_head)
     write_reviewer_readme(out_dir, bundle_manifest)
     try:
         render_index(out_dir, bundle_manifest, out_dir / "index.html")

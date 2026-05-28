@@ -245,8 +245,9 @@ Read these before any operation:
 | Recover when first push fails with "pack exceeds 2 GiB" | `python scripts/repush_chunked.py` |
 | Pause / resume the macOS scheduled-backup job (for repo surgery) | `python scripts/install-launchd.py --pause` then `--resume` |
 | Check whether a newer holotype release is available | `python scripts/update_check.py [--json]` |
-| Verify the archive's hash chain | `python scripts/verify.py` |
-| Verify a single session | `python scripts/verify.py <session-id>` |
+| Verify the archive (per-file hashes + hash chain) | `python scripts/verify.py` |
+| Verify a single session (per-file only) | `python scripts/verify.py <session-id>` |
+| (Re)build or seal the hash-chain ledger | `python scripts/build_ledger.py` (ingest auto-bootstraps; only needed if the ledger is lost or to seal a pre-2.4.0 archive by hand) |
 | Drop and rebuild the SQLite index from the canonical archive | `python scripts/reindex.py` |
 | Load a past session's transcript into this chat | `python scripts/context.py <session-id>` then `Read` the printed path |
 | Push to the configured remote (explicit, never auto) | confirm with user, then `git -C <archive> push` |
