@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -42,7 +43,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from holotype import __version__
 from holotype.chunking import bin_pack_paths, dir_size_bytes
-from holotype.compression import compress_bytes, transcript_filename
+from holotype.compression import compress_bytes, find_transcript, transcript_filename
 from holotype.env import claude_code_version, git_state_for_path, platform_info
 from holotype.hashing import sha256_bytes
 from holotype.index import (
@@ -178,6 +179,123 @@ def existing_sha256(archive: Path, candidate: DepositCandidate) -> str | None:
     return m.get("sha256") if m else None
 
 
+# --- Per-tick change detection + rolling content re-verification ----------
+#
+# The expensive part of an idle tick used to be reading + SHA-256ing every
+# source transcript just to discover nothing changed. needs_processing()
+# replaces that with a stat: append-only logs only grow, so a matching
+# (size, mtime_ns) against the stored manifest values means the bytes are
+# unchanged and the read can be skipped.
+#
+# mtime is a heuristic, not a guarantee (a tool could rewrite content while
+# preserving mtime). So we DON'T trust it as the sole oracle: every tick
+# also force-re-hashes a deterministic 1/SWEEP_BUCKETS slice of the corpus
+# (the "rolling sweep"), cycling through all buckets via a persisted cursor.
+# At the default 30-min cadence that's full content re-verification of the
+# whole archive every ~24h, independent of mtime — the soundness backstop.
+# The same slice is fsck'd (verify_deposit_integrity) against its manifest,
+# giving continuous archive bit-rot detection the tool otherwise lacked.
+SWEEP_BUCKETS = 48
+_SWEEP_CURSOR_REL = Path(".holotype") / "sweep-cursor"
+
+
+def sweep_bucket_for(session_id: str) -> int:
+    """Stable bucket assignment for a session, in [0, SWEEP_BUCKETS).
+
+    Hash-based so the partition is balanced and independent of discovery
+    order; deterministic so a session lands in the same bucket every tick.
+    """
+    h = int(hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8], 16)
+    return h % SWEEP_BUCKETS
+
+
+def read_sweep_bucket(archive: Path) -> int:
+    """Current sweep bucket from the persisted cursor (0 if absent/corrupt)."""
+    try:
+        return int((archive / _SWEEP_CURSOR_REL).read_text().strip()) % SWEEP_BUCKETS
+    except (OSError, ValueError):
+        return 0
+
+
+def advance_sweep_cursor(archive: Path, current: int) -> None:
+    """Advance the cursor by one bucket (atomic write).
+
+    Advancing by exactly one per tick guarantees every bucket is visited
+    once per SWEEP_BUCKETS ticks regardless of tick cadence or downtime —
+    no session is ever permanently skipped by the sweep.
+    """
+    p = archive / _SWEEP_CURSOR_REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".partial")
+    tmp.write_text(str((current + 1) % SWEEP_BUCKETS))
+    os.replace(tmp, p)
+
+
+def needs_processing(
+    archive: Path, candidate: DepositCandidate, *, in_sweep: bool
+) -> bool:
+    """Cheap pre-dispatch gate: should this candidate be read + hashed now?
+
+    True when the file is new, the manifest schema is stale (forces a
+    re-deposit so new fields backfill), the session is in this tick's
+    rolling-sweep slice, or the source's (size, mtime_ns) differ from the
+    stored values. False only when the manifest is current-version, the
+    stat matches, and it's not a sweep tick — i.e. provably unchanged for
+    an append-only log. The content-hash short-circuit inside deposit_one
+    remains as a backstop for anything that slips through.
+    """
+    prior = existing_manifest(archive, candidate)
+    if prior is None:
+        return True
+    if prior.get("manifest_version") != MANIFEST_VERSION:
+        return True
+    if in_sweep:
+        return True
+    stored_size = prior.get("source_size")
+    stored_mtime = prior.get("source_mtime_ns")
+    if stored_size is None or stored_mtime is None:
+        return True  # pre-v6 baseline not yet recorded — read to establish it
+    try:
+        st = candidate.jsonl_path.stat()
+    except OSError:
+        return False  # source vanished; the prior deposit stands untouched
+    return st.st_size != stored_size or st.st_mtime_ns != stored_mtime
+
+
+def verify_deposit_integrity(
+    archive: Path, candidate: DepositCandidate
+) -> str | None:
+    """fsck one deposited transcript against its manifest hash.
+
+    Hashes the on-disk deposit bytes as they sit (compressed bytes vs
+    ``sha256_compressed`` when zstd, raw bytes vs ``sha256`` otherwise) —
+    pure bit-rot detection that needs no zstd and never false-alarms.
+    Returns an error string on mismatch/missing, else None. Run on the
+    rolling-sweep slice so the whole archive is re-checked every ~24h.
+    """
+    m = existing_manifest(archive, candidate)
+    if not m:
+        return None
+    sess_dir = session_archive_dir(archive, candidate)
+    found = find_transcript(sess_dir)
+    if found is None:
+        return f"{candidate.archive_subpath}: deposited transcript missing"
+    path, is_compressed = found
+    expected = m.get("sha256_compressed") if is_compressed else m.get("sha256")
+    if not expected:
+        return None  # nothing stored to check against (e.g. legacy manifest)
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        return f"{candidate.archive_subpath}: deposited transcript unreadable ({e})"
+    if sha256_bytes(raw) != expected:
+        return (
+            f"{candidate.archive_subpath}: ARCHIVE INTEGRITY FAILURE — "
+            f"stored bytes do not match manifest hash"
+        )
+    return None
+
+
 def run_git(archive: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(archive), *args],
@@ -225,6 +343,17 @@ def deposit_one(
     if not data.strip():
         return ("skipped-empty", session_id, False)
 
+    # Source size + mtime at the moment we read it, recorded in the
+    # manifest so the next tick's pre-filter can skip the read+hash when
+    # nothing changed. read_with_stable_check already guaranteed the file
+    # didn't move during the read; this stat matches those bytes.
+    try:
+        _src_stat = jsonl_path.stat()
+        src_size: int | None = _src_stat.st_size
+        src_mtime_ns: int | None = _src_stat.st_mtime_ns
+    except OSError:
+        src_size = src_mtime_ns = None
+
     dest_dir = session_archive_dir(archive, candidate)
     on_disk_name = transcript_filename(compression)
     dest_transcript = dest_dir / on_disk_name
@@ -246,45 +375,63 @@ def deposit_one(
 
     transcript_changed = (prior_sha != new_sha)
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    if compression == "zstd":
-        payload = compress_bytes(data, level=compression_level)
-        sha_compressed = sha256_bytes(payload)
-    else:
-        payload = data
-        sha_compressed = None
-
-    tmp_path = dest_transcript.with_suffix(dest_transcript.suffix + ".partial")
-    tmp_path.write_bytes(payload)
-    os.replace(tmp_path, dest_transcript)
-
-    # If switching modes (e.g. a prior plain deposit, now compressed),
-    # remove the stale alternate-form file so the session dir stays
-    # compression-uniform. Cheap and only triggers on the rare migration.
-    for stale_name in ("transcript.jsonl", "transcript.jsonl.zst"):
-        if stale_name == on_disk_name:
-            continue
-        stale = dest_dir / stale_name
-        if stale.exists():
-            stale.unlink()
-
-    # If this is a pure schema migration (transcript bytes unchanged but
-    # manifest_version bumped), preserve fields that were captured at the
-    # original deposit time and CANNOT be reconstructed by re-deriving from
-    # the bytes:
-    #   - env (especially env.claude_code_version, which reads as null from
-    #     a launchd-tick context but had a real value at the original
-    #     deposit moment)
-    #   - deposited_at (the manifest was deposited THEN, not now)
-    # Real content updates (sha differs) re-capture env fresh, since the
-    # new env corresponds to the moment of the update.
+    # Pure manifest-version migration: canonical transcript bytes are
+    # unchanged, only the schema bumped. Do NOT re-write the transcript.
+    # Re-compressing produces cosmetically-different bytes (zstd output is
+    # not stable across compression levels — an archive bulk-ingested with
+    # --fast-compress then migrated at archival level differs byte-for-byte
+    # — and git-crypt re-encrypts on re-stage), which would turn a
+    # manifest-only schema bump into a full-corpus re-commit + re-push
+    # (~2 GiB on a real archive, over GitHub's 2 GiB pack ceiling). Reuse
+    # the existing on-disk file and its recorded compressed hash. Falls
+    # through to a real write only if the file is missing or the
+    # compression mode changed (then dest_transcript wouldn't exist).
     is_pure_migration = (
         prior_manifest is not None
         and prior_sha == new_sha
         and prior_version != MANIFEST_VERSION
     )
 
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if is_pure_migration and dest_transcript.exists():
+        if compression == "zstd":
+            sha_compressed = prior_manifest.get("sha256_compressed") or sha256_bytes(
+                dest_transcript.read_bytes()
+            )
+        else:
+            sha_compressed = None
+    else:
+        if compression == "zstd":
+            payload = compress_bytes(data, level=compression_level)
+            sha_compressed = sha256_bytes(payload)
+        else:
+            payload = data
+            sha_compressed = None
+
+        tmp_path = dest_transcript.with_suffix(dest_transcript.suffix + ".partial")
+        tmp_path.write_bytes(payload)
+        os.replace(tmp_path, dest_transcript)
+
+        # If switching modes (e.g. a prior plain deposit, now compressed),
+        # remove the stale alternate-form file so the session dir stays
+        # compression-uniform. Cheap and only triggers on the rare migration.
+        for stale_name in ("transcript.jsonl", "transcript.jsonl.zst"):
+            if stale_name == on_disk_name:
+                continue
+            stale = dest_dir / stale_name
+            if stale.exists():
+                stale.unlink()
+
+    # For a pure schema migration (is_pure_migration, computed above),
+    # preserve fields captured at the original deposit time that CANNOT be
+    # reconstructed by re-deriving from the bytes:
+    #   - env (especially env.claude_code_version, which reads as null from
+    #     a launchd-tick context but had a real value at the original
+    #     deposit moment)
+    #   - deposited_at (the manifest was deposited THEN, not now)
+    # Real content updates (sha differs) re-capture env fresh, since the
+    # new env corresponds to the moment of the update.
     if is_pure_migration and isinstance(prior_manifest.get("env"), dict) and prior_manifest["env"]:
         env = dict(prior_manifest["env"])
         original_deposited_at = prior_manifest.get("deposited_at")
@@ -328,6 +475,8 @@ def deposit_one(
         sha256_compressed=sha_compressed,
         project_git_state=deposit_time_git,
         original_deposited_at=original_deposited_at,
+        source_size=src_size,
+        source_mtime_ns=src_mtime_ns,
     )
 
     tmp_manifest = dest_manifest.with_suffix(".json.partial")
@@ -716,6 +865,26 @@ def main(argv: list[str] | None = None) -> int:
                                   "skipped-unchanged": 0, "skipped-empty": 0}
         committed: list[str] = []
 
+        # Per-tick pre-filter: stat each candidate against its stored
+        # (size, mtime_ns) and skip the read+hash when unchanged. Anything
+        # in this tick's rolling-sweep slice is forced through regardless,
+        # for unconditional content re-verification + deposit fsck. Dry-run
+        # inspects every candidate and mutates no state.
+        sweep_bucket = read_sweep_bucket(archive)
+        sweep_candidates: list[tuple[type[Source], DepositCandidate]] = []
+        if args.dry_run:
+            to_process = candidates
+        else:
+            to_process = []
+            for cls, cand in candidates:
+                in_sweep = sweep_bucket_for(cand.session_id) == sweep_bucket
+                if in_sweep:
+                    sweep_candidates.append((cls, cand))
+                if needs_processing(archive, cand, in_sweep=in_sweep):
+                    to_process.append((cls, cand))
+                else:
+                    counts["skipped-unchanged"] += 1
+
         index_path = archive / ".holotype" / "index.sqlite"
         # One SQLite connection for the whole cycle (vs. open-per-session
         # in the old code path, which was the dominant per-session cost
@@ -765,18 +934,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
                 if not args.quiet:
-                    print(f"holotype ingest: {len(candidates)} candidate(s) across {args.workers} worker(s)")
+                    print(f"holotype ingest: {len(to_process)} candidate(s) across {args.workers} worker(s)")
 
                 # Submit in order; results stream back in same order via
                 # executor.map.
-                cls_by_name = {cls.name: cls for cls, _ in candidates}
+                cls_by_name = {cls.name: cls for cls, _ in to_process}
                 submissions = [
                     (
                         str(archive),
                         cls.name,
                         candidate_to_dict(cand),
                     )
-                    for cls, cand in candidates
+                    for cls, cand in to_process
                 ]
 
                 executor = ProcessPoolExecutor(max_workers=args.workers)
@@ -788,7 +957,7 @@ def main(argv: list[str] | None = None) -> int:
                             for s in submissions
                         ],
                     )
-                    for (cls, candidate), result in zip(candidates, results_iter):
+                    for (cls, candidate), result in zip(to_process, results_iter):
                         _drain_result(
                             result, cls, candidate, conn, archive,
                             counts, committed, bulk_initial, migrations,
@@ -804,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
                     executor.shutdown(wait=True, cancel_futures=True)
             else:
                 # Serial path: unchanged from v1.2 / earlier.
-                for source_cls, candidate in candidates:
+                for source_cls, candidate in to_process:
                     if args.dry_run:
                         counts["new"] += 1
                         continue
@@ -993,13 +1162,35 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     conn2.commit()
 
+        # Rolling-sweep fsck: re-hash this tick's deposit slice against its
+        # manifest to catch archive bit-rot. Runs every tick (even idle
+        # ones) so the whole archive is re-verified each sweep cycle.
+        # Failures are reported loudly and sent to stderr — they indicate
+        # the deposited artifact no longer matches what was recorded.
+        integrity_failures: list[str] = []
+        if not args.dry_run:
+            for _cls, cand in sweep_candidates:
+                err = verify_deposit_integrity(archive, cand)
+                if err:
+                    integrity_failures.append(err)
+            advance_sweep_cursor(archive, sweep_bucket)
+        if integrity_failures:
+            sys.stderr.write(
+                f"holotype: {len(integrity_failures)} ARCHIVE INTEGRITY "
+                f"FAILURE(S) during rolling sweep:\n"
+            )
+            for f in integrity_failures:
+                sys.stderr.write(f"  {f}\n")
+
         any_changes = counts["new"] + counts["updated"] > 0
-        if not args.quiet or any_changes:
+        if not args.quiet or any_changes or integrity_failures:
             print(
                 f"holotype ingest: new={counts['new']} updated={counts['updated']}"
                 f" skipped-live={counts['skipped-live']}"
                 f" unchanged={counts['skipped-unchanged']}"
                 f" empty={counts['skipped-empty']}"
+                f" swept={len(sweep_candidates)}"
+                + (f" INTEGRITY-FAIL={len(integrity_failures)}" if integrity_failures else "")
             )
             if committed and not args.quiet:
                 print("\n".join(committed))

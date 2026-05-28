@@ -204,7 +204,11 @@ def main(argv: list[str] | None = None) -> int:
                 manifest["sha256"] == recomputed,
                 f"sha256 mismatch for {tr}: manifest={manifest['sha256']}, recomputed={recomputed}",
             )
-            expect(manifest["manifest_version"] == 5, "manifest_version != 5")
+            expect(manifest["manifest_version"] == 6, "manifest_version != 6")
+            # v6: source_size + source_mtime_ns recorded for the pre-filter.
+            expect(isinstance(manifest.get("source_size"), int)
+                   and isinstance(manifest.get("source_mtime_ns"), int),
+                   "v6 source_size/source_mtime_ns missing from fresh deposit")
             expect(manifest.get("source") == "claude-code",
                    f"manifest.source wrong: {manifest.get('source')}")
             expect(manifest["message_count"] > 0, "message_count is zero")
@@ -556,14 +560,14 @@ def main(argv: list[str] | None = None) -> int:
                f"expected exactly 1 migration commit, got {len(new_commits)}:\n{chr(10).join(new_commits)}")
         expect("migrate:" in new_commits[0],
                f"expected `migrate:` prefix on combined commit: {new_commits[0]}")
-        expect("schema v5" in new_commits[0],
+        expect("schema v6" in new_commits[0],
                f"combined commit should mention target schema version: {new_commits[0]}")
-        # The downgraded manifest is now back to v5 AND has the new v5 fields
-        # populated from the rebuild. This proves the version-bump backfill
-        # path actually produces the new excerpts for real existing archives,
-        # not just for fresh deposits.
+        # The downgraded manifest is now back to the current schema AND has the
+        # new fields populated from the rebuild. This proves the version-bump
+        # backfill path actually produces the new fields for real existing
+        # archives, not just for fresh deposits.
         post_migrate = json.loads(mig_target.read_text())
-        expect(post_migrate["manifest_version"] == 5,
+        expect(post_migrate["manifest_version"] == 6,
                f"post-migration manifest_version: {post_migrate['manifest_version']}")
         expect("first_user_message_excerpt" in post_migrate,
                "post-migration manifest missing first_user_message_excerpt key")
@@ -1342,6 +1346,153 @@ def main(argv: list[str] | None = None) -> int:
         expect(payload.get("status") in {"current", "update-available", "ahead", "unreachable"},
                f"update_check unexpected status: {payload}")
         expect("local" in payload, f"update_check missing local version: {payload}")
+
+        step("v6 change-detection: fast-path skip, sweep force, fsck")
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "_ht_ingest_cd", str(REPO_ROOT / "scripts" / "ingest.py")
+        )
+        _ig = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_ig)
+
+        # Rolling-sweep partition must cover every session exactly once
+        # across the full bucket range — no session is permanently skipped.
+        _ids = [f"sess-{i}" for i in range(400)]
+        _covered: set[str] = set()
+        for _b in range(_ig.SWEEP_BUCKETS):
+            in_b = {s for s in _ids if _ig.sweep_bucket_for(s) == _b}
+            expect(_covered.isdisjoint(in_b), "sweep buckets overlap (session in two buckets)")
+            _covered |= in_b
+        expect(_covered == set(_ids), "sweep partition misses some sessions")
+
+        # Dedicated archive + source so these assertions are self-contained.
+        cd_archive = tmp / "cd-archive"
+        res = run_script(
+            REPO_ROOT / "scripts" / "init.py", "--path", str(cd_archive),
+            "--remote-url", "", "--remote-kind", "none", "--compression", "none",
+        )
+        expect(res.returncode == 0, f"cd init failed: {res.stderr}")
+        cd_src = materialize_source(tmp / "cd")
+        res = run_script(
+            REPO_ROOT / "scripts" / "ingest.py", "--archive", str(cd_archive),
+            "--source", str(cd_src), "--source-name", "claude-code", "--workers", "1",
+        )
+        expect(res.returncode == 0, f"cd ingest failed: {res.stderr}")
+
+        cands = _ig.discover_candidates({}, cd_src, "claude-code")
+        by_id = {c.session_id: (cls, c) for cls, c in cands}
+        basic_uuid = "00000000-0000-4000-8000-000000000001"
+        mm_uuid = "00000000-0000-4000-8000-000000000002"
+        expect(basic_uuid in by_id and mm_uuid in by_id,
+               f"cd candidates missing expected sessions: {list(by_id)}")
+        _, cand_basic = by_id[basic_uuid]
+        _, cand_mm = by_id[mm_uuid]
+
+        # The deposit recorded source_size + source_mtime_ns at v6.
+        m_basic = _ig.existing_manifest(cd_archive, cand_basic)
+        expect(m_basic is not None and m_basic.get("manifest_version") == 6,
+               f"basic manifest not v6: {m_basic and m_basic.get('manifest_version')}")
+        expect(isinstance(m_basic.get("source_size"), int)
+               and isinstance(m_basic.get("source_mtime_ns"), int),
+               "v6 manifest missing source_size/source_mtime_ns")
+
+        # Unchanged + current-version + not in sweep → skip the read.
+        expect(_ig.needs_processing(cd_archive, cand_basic, in_sweep=False) is False,
+               "unchanged current-version manifest should be fast-path skipped")
+        # Sweep slice forces a re-hash regardless of mtime (soundness backstop).
+        expect(_ig.needs_processing(cd_archive, cand_basic, in_sweep=True) is True,
+               "rolling-sweep slice must force reprocessing even when unchanged")
+        # Healthy deposit passes the fsck.
+        expect(_ig.verify_deposit_integrity(cd_archive, cand_basic) is None,
+               "healthy deposit should pass integrity fsck")
+
+        # Stale manifest schema forces reprocess even with matching stat.
+        mm_manifest_path = _ig.session_archive_dir(cd_archive, cand_mm) / "manifest.json"
+        mm_obj = json.loads(mm_manifest_path.read_text())
+        mm_obj["manifest_version"] = 5
+        mm_manifest_path.write_text(json.dumps(mm_obj, indent=2, sort_keys=True) + "\n")
+        expect(_ig.needs_processing(cd_archive, cand_mm, in_sweep=False) is True,
+               "stale manifest_version must force reprocessing regardless of stat")
+
+        # Corrupting the deposited transcript is caught by the fsck — this is
+        # the continuous archive bit-rot detection the sweep provides.
+        mm_dir = _ig.session_archive_dir(cd_archive, cand_mm)
+        found = _ig.find_transcript(mm_dir)
+        expect(found is not None, "deposited transcript for mm session not found")
+        found[0].write_bytes(b'{"corrupted":"bit-rot"}\n')
+        # Restore the manifest version so fsck checks against the real hash.
+        mm_obj["manifest_version"] = 6
+        mm_manifest_path.write_text(json.dumps(mm_obj, indent=2, sort_keys=True) + "\n")
+        fsck_err = _ig.verify_deposit_integrity(cd_archive, cand_mm)
+        expect(fsck_err is not None and "INTEGRITY" in fsck_err,
+               f"fsck failed to detect corrupted deposit (got {fsck_err!r})")
+
+        # A genuine source change (append → size + mtime differ) is detected
+        # by the stat-based pre-filter without needing the sweep.
+        with open(cand_basic.jsonl_path, "ab") as fh:
+            fh.write(b'{"type":"user","message":{"role":"user","content":"appended"}}\n')
+        expect(_ig.needs_processing(cd_archive, cand_basic, in_sweep=False) is True,
+               "appended source (size/mtime changed) must be reprocessed")
+
+        step("pure migration does NOT rewrite the transcript (no re-compress churn)")
+        # Regression guard: a manifest-version bump must touch only the
+        # manifest, never the transcript. The failure mode (real archive,
+        # 2 GiB unpushable pack): the archive was bulk-ingested at zstd -3
+        # (--fast-compress), then a migration re-compressed at archival -19,
+        # producing byte-different .zst blobs for identical canonical
+        # content. We reproduce the exact level mismatch here.
+        zc_archive = tmp / "zc-archive"
+        res = run_script(
+            REPO_ROOT / "scripts" / "init.py", "--path", str(zc_archive),
+            "--remote-url", "", "--remote-kind", "none", "--compression", "zstd",
+        )
+        if res.returncode != 0 and "zstd" in (res.stderr + res.stdout).lower():
+            step("  (skipped — zstd not available on PATH)")
+        else:
+            expect(res.returncode == 0, f"zc init failed: {res.stderr}")
+            zc_src = materialize_source(tmp / "zc")
+            # Deposit at the FAST level so the on-disk bytes differ from what
+            # an archival re-compress would produce.
+            res = run_script(
+                REPO_ROOT / "scripts" / "ingest.py", "--archive", str(zc_archive),
+                "--source", str(zc_src), "--source-name", "claude-code",
+                "--workers", "1", "--fast-compress",
+            )
+            expect(res.returncode == 0, f"zc fast-compress ingest failed: {res.stderr}")
+            zc_cands = _ig.discover_candidates({}, zc_src, "claude-code")
+            _, zc_cand = next(
+                (cls, c) for cls, c in zc_cands if c.session_id == basic_uuid
+            )
+            zc_dir = _ig.session_archive_dir(zc_archive, zc_cand)
+            zc_zst = zc_dir / "transcript.jsonl.zst"
+            expect(zc_zst.exists(), "zstd deposit did not produce transcript.jsonl.zst")
+            bytes_before = zc_zst.read_bytes()
+
+            # Downgrade the manifest version and re-ingest at the DEFAULT
+            # (archival) level — a re-compress here would change the bytes.
+            zc_manifest = zc_dir / "manifest.json"
+            zc_obj = json.loads(zc_manifest.read_text())
+            zc_obj["manifest_version"] = 3
+            zc_manifest.write_text(json.dumps(zc_obj, indent=2, sort_keys=True) + "\n")
+            res = run_script(
+                REPO_ROOT / "scripts" / "ingest.py", "--archive", str(zc_archive),
+                "--source", str(zc_src), "--source-name", "claude-code", "--workers", "1",
+            )
+            expect(res.returncode == 0, f"zc migration ingest failed: {res.stderr}")
+
+            bytes_after = zc_zst.read_bytes()
+            expect(bytes_before == bytes_after,
+                   "pure migration rewrote the transcript .zst (re-compress churn regression)")
+            post = json.loads(zc_manifest.read_text())
+            expect(post["manifest_version"] == 6,
+                   f"zc post-migration manifest_version: {post['manifest_version']}")
+            # The reused compressed hash must still match the untouched file —
+            # otherwise verify would break on the migrated deposit.
+            expect(post.get("sha256_compressed") == hashlib.sha256(bytes_after).hexdigest(),
+                   "migrated manifest's sha256_compressed no longer matches the on-disk file")
+            res = run_script(REPO_ROOT / "scripts" / "verify.py", "--archive", str(zc_archive))
+            expect(res.returncode == 0,
+                   f"verify failed after pure migration: {res.stderr or res.stdout}")
 
         print("\nALL CHECKS PASSED")
         success = True

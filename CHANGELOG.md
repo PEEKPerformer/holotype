@@ -2,6 +2,45 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-05-28
+
+Idle ingest ticks no longer re-read and re-hash the entire archive. A no-op tick on the maintainer's 4.8 GB / ~3,380-session archive dropped from ~10 s of full-corpus hashing to a stat sweep, and tick cost is now decoupled from archive size. The content SHA-256 remains the integrity authority — this is a latency optimization with an added soundness backstop, not a weakening of the forensic guarantee.
+
+### Why
+
+The per-tick change-detection path read every source transcript in full and SHA-256'd it just to discover nothing had changed. That floor grew with the corpus (≈40 s at 20 GB) and was the only real cost of running the background tick more frequently. The fix exploits the fact that CLI session logs are append-only: a matching size + mtime means the bytes are unchanged.
+
+### The two-part design (`scripts/ingest.py`, `holotype/manifest.py`)
+
+- **Fast path (change *latency*).** Manifest schema bumped to **v6**, adding `source_size` + `source_mtime_ns` recorded at deposit time. A new pre-dispatch gate, `needs_processing()`, stats each candidate and skips the read+hash when size and mtime match the stored values and the manifest is current-version. A real append moves both, so genuine changes are still caught within one tick exactly as before.
+- **Rolling sweep (content *soundness*).** mtime is a heuristic — a tool could rewrite content while preserving mtime. So every tick *also* force-re-hashes a deterministic `1/48` slice of the corpus, advancing through all buckets via a persisted cursor (`.holotype/sweep-cursor`). At the default 30-min cadence that's full content re-verification of the whole archive every ~24 h, **independent of mtime**. No session is ever permanently skipped: the partition is exhaustive and the cursor advances exactly one bucket per tick regardless of cadence or downtime.
+
+### Bonus: continuous archive fsck
+
+The same sweep slice is checked with the new `verify_deposit_integrity()` — re-hashing the *deposited* bytes against the manifest to catch archive-side bit-rot. Previously nothing re-verified the archive unless a user ran `verify.py` by hand; now the background tick audits the entire archive on the same ~24 h cycle and reports any integrity failure loudly (stderr + `INTEGRITY-FAIL=N` in the summary line).
+
+### What you give up
+
+Only this: a *pathological* content change that preserves mtime is detected within the sweep cycle (≤24 h) rather than at the next tick. For the real host CLIs, which always advance mtime on append, detection latency is unchanged. The sweep cycle scales with the tick interval (`SWEEP_BUCKETS` ticks).
+
+### Also fixed: manifest migrations no longer re-compress transcripts
+
+While migrating a real 3,300-session archive to v6, the first tick produced a **single 2.08 GiB commit** — over GitHub's 2 GiB pack ceiling, so it couldn't push at all. Root cause (latent since the compression feature landed, exposed by this migration): `deposit_one` re-compressed and re-wrote the transcript on *every* deposit, including pure manifest-version migrations. An archive bulk-ingested at `--fast-compress` (zstd -3) and later migrated at the default `archival` level (zstd -19) produced byte-different `.zst` blobs for **identical canonical content** — so a manifest-only schema bump silently rewrote the entire compressed corpus and demanded a full re-push.
+
+- `scripts/ingest.py` now detects the pure-migration case *before* the write and **reuses the existing on-disk transcript and its recorded `sha256_compressed`** instead of re-compressing. A migration commit now touches only manifests (verified: 0 transcripts, 3,365 manifests on the real archive; the migrate commit dropped from 2.08 GiB to ~25 MB and pushed cleanly).
+- This recurs on *every* future `MANIFEST_VERSION` bump, so the fix matters beyond v6 — it's what keeps schema migrations cheap and pushable for everyone, not just archives that happened to mix compression levels.
+- `scripts/selftest.py` adds a regression test that reproduces the exact `--fast` → `archival` level mismatch and asserts the migration leaves the `.zst` byte-identical and that `verify.py` still passes on the migrated deposit.
+
+### Migration
+
+First tick after upgrade re-processes every existing manifest (the `manifest_version` 5→6 mismatch forces it), populating the new fields and producing one combined `migrate:` commit. Transcript bytes are unchanged, so SHA-256 hashes and `deposited_at` are preserved by the existing pure-migration path — and, with the fix above, the deposited transcript files are left untouched. One-time cost; every subsequent idle tick is a stat sweep.
+
+### Tests
+
+`scripts/selftest.py` adds: sweep partition is exhaustive and non-overlapping; unchanged current-version manifest is fast-path skipped; sweep slice forces reprocessing regardless of mtime; stale `manifest_version` forces reprocessing; an appended source is detected via size/mtime; and `verify_deposit_integrity()` catches a corrupted deposit.
+
+---
+
 ## [2.2.6] — 2026-05-27
 
 CI failure fix for v2.2.5. The new recovery-script test green on the maintainer's machine but red on GitHub Actions runners.

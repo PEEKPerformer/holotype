@@ -21,12 +21,22 @@ from holotype.hashing import sha256_bytes, sha256_file
 from holotype.sources.base import Source
 
 
-MANIFEST_VERSION = 5
+MANIFEST_VERSION = 6
 
 # v5 added first/last_user_message_excerpt — see _clean_user_excerpt for
 # how source-specific wrappings (Codex <environment_context>, Antigravity
 # <USER_REQUEST>, Claude Code <system-reminder>) are stripped so the
 # excerpt reads as a real user message in the viewer's session cards.
+#
+# v6 added source_size + source_mtime_ns: the source file's size and
+# nanosecond mtime at deposit time. ingest's per-tick pre-filter compares
+# these against the live source to decide whether a re-read+re-hash is
+# needed — append-only logs only grow, so a size/mtime match means the
+# bytes are unchanged. This is a latency optimization only: the content
+# SHA-256 remains the authority, and ingest's rolling sweep re-hashes
+# every deposit on a ~24h cycle regardless of these values, so a content
+# change made without advancing mtime is still caught (just within the
+# sweep window rather than instantly).
 USER_EXCERPT_MAX_CHARS = 160
 
 
@@ -94,6 +104,13 @@ class SessionManifest:
     # convenience field for the index UI.
     first_user_message_excerpt: str | None = None
     last_user_message_excerpt: str | None = None
+    # Change-detection fields (manifest_version >= 6). The source file's
+    # size in bytes and nanosecond mtime at deposit time. Used only by
+    # ingest's per-tick pre-filter to skip the read+hash of unchanged
+    # files; never authoritative for integrity (sha256 is). Null on
+    # pre-v6 manifests until they're re-deposited.
+    source_size: int | None = None
+    source_mtime_ns: int | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
@@ -330,6 +347,8 @@ def build_manifest(
     sha256_compressed: str | None = None,
     project_git_state: dict | None = None,
     original_deposited_at: str | None = None,
+    source_size: int | None = None,
+    source_mtime_ns: int | None = None,
 ) -> SessionManifest:
     """Build a SessionManifest from already-read uncompressed JSONL bytes.
 
@@ -394,4 +413,6 @@ def build_manifest(
         total_cache_read_tokens=token_totals["total_cache_read_tokens"],
         first_user_message_excerpt=_clean_user_excerpt(scan.get("first_user_text")),
         last_user_message_excerpt=_clean_user_excerpt(scan.get("last_user_text")),
+        source_size=source_size,
+        source_mtime_ns=source_mtime_ns,
     )
