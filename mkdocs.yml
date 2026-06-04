@@ -3,7 +3,7 @@ site_description: >-
   Forensic-grade archival of LLM-driven agent CLI sessions for scientific
   reproducibility, explained plainly because a provenance tool has no business
   being a black box.
-site_url: https://peekperformer.github.io/holotype/
+site_url: https://bfer.land/holotype/
 repo_url: https://github.com/PEEKPerformer/holotype
 repo_name: PEEKPerformer/holotype
 copyright: MIT-licensed. Cite the version DOI of the release your work used.
