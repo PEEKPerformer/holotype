@@ -1,6 +1,6 @@
 # Linux: background ingest via user systemd
 
-The macOS launchd background tick (`scripts/install-launchd.py`) catches long-running agent-CLI sessions whose `Stop` hook never fires. Linux users get the same behavior via a user-level systemd timer + service unit. This document is a reference template — not yet installed by a script.
+The macOS launchd background tick (`scripts/install-launchd.py`) catches long-running agent-CLI sessions whose `Stop` hook never fires. Linux users get the same behavior via a user-level systemd timer + service unit. This document is a reference template, not yet installed by a script.
 
 ## Why a user-level service
 
@@ -21,7 +21,7 @@ Type=oneshot
 # (e.g. /home/you/Git/holotype) and <ARCHIVE> with the absolute path
 # returned by `cat ~/.config/holotype/archive-path`.
 ExecStart=/usr/bin/env python3 <HOLOTYPE_REPO>/scripts/ingest.py --archive <ARCHIVE> --quiet
-# Hold standard limits — the ingest is mostly I/O bound and should
+# Hold standard limits: the ingest is mostly I/O bound and should
 # never exceed normal user resource caps.
 Nice=10
 IOSchedulingClass=best-effort
@@ -87,7 +87,7 @@ systemctl --user daemon-reload
 - **User must be logged in for the timer to fire** unless lingering is enabled (`loginctl enable-linger <user>`). For headless servers or auto-suspending laptops, enable lingering or accept that the timer pauses when you're logged out.
 - **Concurrency safety is handled inside ingest.py** via `flock` at `<archive>/.holotype/.lock`. If you accidentally run two ingest cycles back-to-back, the second exits cleanly with "another ingest is running, exiting."
 - **GPG-signed commits** (`--sign-commits`) need `GPG_TTY` available. For a systemd-driven invocation, that usually means using `gpg-agent` with `allow-loopback-pinentry` and an unlocked key. Test interactively first.
-- This template doesn't push to a remote — same as the macOS launchd tick. Pushing is always an explicit user action.
+- This template doesn't push to a remote, same as the macOS launchd tick. Pushing is always an explicit user action.
 
 ## When to write `scripts/install-systemd.py`
 

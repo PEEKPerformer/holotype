@@ -6,8 +6,8 @@ This is a separate workflow from `docs/PUBLISHING_TO_ZENODO.md`. That document i
 
 A paper that uses `holotype` should cite two things:
 
-1. **The tool** — `holotype v2.0.x` at the Zenodo software DOI minted from the GitHub release. This goes in the Methods or Software section.
-2. **The deposited session bundle** — a separate Zenodo deposit per paper, containing only the cited transcripts. This goes in the Data Availability Statement.
+1. **The tool**: `holotype v2.0.x` at the Zenodo software DOI minted from the GitHub release. This goes in the Methods or Software section.
+2. **The deposited session bundle**: a separate Zenodo deposit per paper, containing only the cited transcripts. This goes in the Data Availability Statement.
 
 These deposits are independent. The tool's DOI tracks releases of `holotype` (one per tagged release on GitHub). The bundle's DOI tracks a specific paper's session subset.
 
@@ -25,10 +25,10 @@ This authorizes Zenodo to receive a webhook from GitHub on every new release eve
 
 Zenodo's GitHub integration only fires for **new releases created after the toggle was turned on.** Existing releases (`v1.0.0` through `v2.0.1` as of this writing) won't get DOIs retroactively. Two ways to handle:
 
-- **Option A — accept the gap and start fresh from the next release.** The current v2.0.1 release stays on GitHub but doesn't get a Zenodo DOI. The next release (e.g., `v2.0.2` or any future release) is the first one with a DOI. This is the cleaner path for most projects.
-- **Option B — delete + recreate the v2.0.1 release on GitHub.** This makes Zenodo see it as new. Costs a few seconds; risks losing the release's view count (negligible at submission time).
+- **Option A: accept the gap and start fresh from the next release.** The current v2.0.1 release stays on GitHub but doesn't get a Zenodo DOI. The next release (e.g., `v2.0.2` or any future release) is the first one with a DOI. This is the cleaner path for most projects.
+- **Option B: delete + recreate the v2.0.1 release on GitHub.** This makes Zenodo see it as new. Costs a few seconds; risks losing the release's view count (negligible at submission time).
 
-For `holotype`: **Option A is recommended** — accept the gap, start fresh from the next release.
+For `holotype`: **Option A is recommended**: accept the gap, start fresh from the next release.
 
 ## Cutting a release that mints a DOI
 
@@ -67,11 +67,11 @@ Use the **concept DOI** (not the version DOI) so the badge always points at the 
 
 ## What if Zenodo's integration silently fails?
 
-It happens occasionally — webhook gets lost, Zenodo's GitHub indexer hiccups, etc. Symptoms: a release is created on GitHub but doesn't appear in Zenodo's integration list.
+It happens occasionally: webhook gets lost, Zenodo's GitHub indexer hiccups, etc. Symptoms: a release is created on GitHub but doesn't appear in Zenodo's integration list.
 
 Recovery:
 
-1. Check <https://zenodo.org/account/settings/github/> — the repo should still show "ON."
+1. Check <https://zenodo.org/account/settings/github/>. The repo should still show "ON."
 2. On the repo's row, expand the dropdown. Recent releases should be listed. If the missing release is in the list but shows no DOI, click "Sync" or wait another 30 minutes.
 3. If the release isn't in the list at all, toggle the repo OFF and back ON, then re-create the GitHub release (`gh release delete vX.Y.Z && gh release create vX.Y.Z --verify-tag --notes-from-tag`).
 4. Last resort: manually create a Zenodo deposit, upload the release tarball (downloadable from `https://github.com/PEEKPerformer/holotype/archive/refs/tags/vX.Y.Z.tar.gz`), and link to the GitHub release in the description. This costs the auto-update of the badge but works.

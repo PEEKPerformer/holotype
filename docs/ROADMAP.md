@@ -1,12 +1,12 @@
 # Holotype roadmap
 
-Captured candidate work for future versions, with honest tradeoffs and rough impact estimates. Filed here (not in CHANGELOG — CHANGELOG is for shipped things) so the next contributor has a starting point.
+Captured candidate work for future versions, with honest tradeoffs and rough impact estimates. Filed here (not in CHANGELOG: CHANGELOG is for shipped things) so the next contributor has a starting point.
 
-## v1.2 candidates — SHIPPED in v1.2.0
+## v1.2 candidates, SHIPPED in v1.2.0
 
 The v1.2 list (deferred FTS, --fast-compress, mmap_size) shipped in `v1.2.0`. See `CHANGELOG.md` for the full set. Auto-chunking of oversized bulk-initial commits also landed there (was originally a v1.1.6 recovery-tool concept; promoted to ingest-side prevention).
 
-### Investigate `git-crypt` long-running filter mode — INVESTIGATED, NOT AVAILABLE
+### Investigate `git-crypt` long-running filter mode, INVESTIGATED, NOT AVAILABLE
 
 Identified as the dominant cost in encrypted bulk-initial: per-file `git-crypt clean` filter forks at `git add` time (~50 ms each × N files = many minutes of pure subprocess startup on a multi-thousand-session archive). Git's process-filter protocol (since git 2.11) lets a filter program stay running across multiple files in one `git add`, eliminating the per-file fork cost.
 
@@ -18,14 +18,14 @@ Identified as the dominant cost in encrypted bulk-initial: per-file `git-crypt c
 
 **Options going forward**:
 - **Upstream PR**: implement the protocol in git-crypt's C++ ourselves. Well-specified (`Documentation/long-running-process-protocol.txt` in Git source) but real C++ work + we'd then depend on upstream merging + releasing.
-- **Wrapper script** that speaks the process-filter protocol externally but calls `git-crypt clean` / `smudge` internally — still forks once per file internally, zero net win.
+- **Wrapper script** that speaks the process-filter protocol externally but calls `git-crypt clean` / `smudge` internally: still forks once per file internally, zero net win.
 - **Live with it**: accept encrypted bulk-initial is ~1-2 hr for 6000 sessions on M-series, lean on the parallel-workers v2 design instead (parallel workers can each invoke git-crypt concurrently, partially amortizing the per-file fork cost).
 
 **Decision**: Recommendation #3 (live with it + document honestly + lean on parallelism). Re-evaluate if/when git-crypt upstream merges process-filter support.
 
 ---
 
-## v2 candidates — SHIPPED in v2.0.0
+## v2 candidates, SHIPPED in v2.0.0
 
 The v2 parallel-workers design shipped in `v2.0.0`. See `CHANGELOG.md` for the full release notes. Final shape:
 
@@ -54,7 +54,7 @@ Reconsider only if:
 
 - **GPU acceleration.** Workload is small-file I/O + serialized SQLite + AES-NI / SHA-NI hardware-accelerated crypto. GPU adds PCIe round-trip cost without benefit on this shape. See the analysis discussion in commit history.
 - **`pip install` console scripts for `scripts/<name>.py`.** Some filenames have hyphens that can't be Python module names. Documented invocation stays `python scripts/<name>.py`.
-- **Auto-export of git-crypt key at init.** Creates a sense of "init handled it for me" that the threat model doesn't support. The user must export to a backup destination *they* picked — see `HOW_TO_BACK_UP_YOUR_KEY.md`.
+- **Auto-export of git-crypt key at init.** Creates a sense of "init handled it for me" that the threat model doesn't support. The user must export to a backup destination *they* picked. See `HOW_TO_BACK_UP_YOUR_KEY.md`.
 
 ---
 
