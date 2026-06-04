@@ -1,0 +1,4 @@
+# Documentation site (MkDocs Material). Not needed to run holotype itself —
+# the skill and scripts are stdlib-only Python. This is only for building the
+# explanatory site under web/. Install with: pip install -r requirements-docs.txt
+mkdocs-material>=9.5

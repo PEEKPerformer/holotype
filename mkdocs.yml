@@ -1,0 +1,91 @@
+site_name: holotype
+site_description: >-
+  Forensic-grade archival of LLM-driven agent CLI sessions for scientific
+  reproducibility, explained plainly because a provenance tool has no business
+  being a black box.
+site_url: https://peekperformer.github.io/holotype/
+repo_url: https://github.com/PEEKPerformer/holotype
+repo_name: PEEKPerformer/holotype
+copyright: MIT-licensed. Cite the version DOI of the release your work used.
+
+# The narrative site lives under web/. The operational docs under docs/ stay as
+# repo-rendered markdown (they link to root files that don't resolve as a site).
+docs_dir: web
+
+theme:
+  name: material
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    logo: material/dna  # holotype, n. — the single reference specimen
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Match system
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+    - search.highlight
+
+nav:
+  - The thesis: index.md
+  - Why it exists: why.md
+  - The six non-negotiables: principles.md
+  - How it works: how-it-works.md
+  - What it won't do: non-goals.md
+  - Verify it yourself: verify.md
+  - Cite & install: cite.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.keys
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/PEEKPerformer/holotype
+    - icon: fontawesome/solid/quote-left
+      link: https://doi.org/10.5281/zenodo.20349311
+      name: Cite via Zenodo
