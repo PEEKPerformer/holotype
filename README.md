@@ -1,8 +1,11 @@
 # holotype
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20349311.svg)](https://doi.org/10.5281/zenodo.20349311)
+[![Docs](https://img.shields.io/badge/docs-bfer.land%2Fholotype-008080)](https://bfer.land/holotype/)
 
 Forensic-grade archival of LLM-driven agent CLI sessions for scientific reproducibility, packaged as an [agent skill](https://agentskills.io) with bundled Python scripts.
+
+**Full explanatory docs at [bfer.land/holotype](https://bfer.land/holotype/).** What holotype does and why, written so a human can fully understand it (though the best way to understand it is to have an LLM clone the repo and read it).
 
 > *holotype, n. (taxonomy): the single physical specimen used when a species is formally described. Every later observation is compared against it.*
 
