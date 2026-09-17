@@ -44,7 +44,13 @@ sys.path.insert(0, str(REPO_ROOT))
 from holotype import __version__
 from holotype.archive import disable_auto_maintenance
 from holotype.chunking import bin_pack_paths, dir_size_bytes
-from holotype.compression import compress_bytes, find_transcript, transcript_filename
+from holotype.compression import (
+    compress_bytes,
+    decompress_bytes,
+    find_transcript,
+    transcript_filename,
+    zstd_available,
+)
 from holotype.env import claude_code_version, git_state_for_path, platform_info
 from holotype.hashing import sha256_bytes
 from holotype.index import (
@@ -265,15 +271,22 @@ def needs_processing(
 
 
 def verify_deposit_integrity(
-    archive: Path, candidate: DepositCandidate
+    archive: Path,
+    candidate: DepositCandidate,
+    stale_out: list[str] | None = None,
 ) -> str | None:
     """fsck one deposited transcript against its manifest hash.
 
     Hashes the on-disk deposit bytes as they sit (compressed bytes vs
-    ``sha256_compressed`` when zstd, raw bytes vs ``sha256`` otherwise) —
-    pure bit-rot detection that needs no zstd and never false-alarms.
+    ``sha256_compressed`` when zstd, raw bytes vs ``sha256`` otherwise).
     Returns an error string on mismatch/missing, else None. Run on the
     rolling-sweep slice so the whole archive is re-checked every ~24h.
+
+    When only the compressed hash disagrees, the file is decompressed and
+    checked against the canonical ``sha256``. If that matches, the content
+    is intact and only the recorded compressed hash is stale: the session
+    is appended to ``stale_out`` instead of being reported as a failure.
+    ``scripts/repair_compressed_hashes.py`` rewrites the stale values.
     """
     m = existing_manifest(archive, candidate)
     if not m:
@@ -291,6 +304,15 @@ def verify_deposit_integrity(
     except OSError as e:
         return f"{candidate.archive_subpath}: deposited transcript unreadable ({e})"
     if sha256_bytes(raw) != expected:
+        if is_compressed and m.get("sha256") and zstd_available():
+            try:
+                canonical = sha256_bytes(decompress_bytes(raw))
+            except Exception:
+                canonical = None
+            if canonical == m.get("sha256"):
+                if stale_out is not None:
+                    stale_out.append(candidate.archive_subpath)
+                return None
         return (
             f"{candidate.archive_subpath}: ARCHIVE INTEGRITY FAILURE — "
             f"stored bytes do not match manifest hash"
@@ -398,9 +420,11 @@ def deposit_one(
 
     if is_pure_migration and dest_transcript.exists():
         if compression == "zstd":
-            sha_compressed = prior_manifest.get("sha256_compressed") or sha256_bytes(
-                dest_transcript.read_bytes()
-            )
+            # Hash the file as it sits instead of copying the prior
+            # manifest's value. A copied value can be stale: the v2.3.0
+            # migration carried 1,832 stale compressed hashes forward on a
+            # real archive, and each one read as an integrity failure.
+            sha_compressed = sha256_bytes(dest_transcript.read_bytes())
         else:
             sha_compressed = None
     else:
@@ -1250,9 +1274,10 @@ def main(argv: list[str] | None = None) -> int:
         # Failures are reported loudly and sent to stderr — they indicate
         # the deposited artifact no longer matches what was recorded.
         integrity_failures: list[str] = []
+        stale_compressed: list[str] = []
         if not args.dry_run:
             for _cls, cand in sweep_candidates:
-                err = verify_deposit_integrity(archive, cand)
+                err = verify_deposit_integrity(archive, cand, stale_compressed)
                 if err:
                     integrity_failures.append(err)
             advance_sweep_cursor(archive, sweep_bucket)
@@ -1263,6 +1288,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             for f in integrity_failures:
                 sys.stderr.write(f"  {f}\n")
+        if stale_compressed and not args.quiet:
+            print(
+                f"holotype: {len(stale_compressed)} deposit(s) in this sweep have a "
+                f"stale sha256_compressed (content verified intact). Fix with "
+                f"`python scripts/repair_compressed_hashes.py`."
+            )
 
         any_changes = counts["new"] + counts["updated"] > 0
         if not args.quiet or any_changes or integrity_failures:
@@ -1273,6 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
                 f" empty={counts['skipped-empty']}"
                 f" swept={len(sweep_candidates)}"
                 + (f" INTEGRITY-FAIL={len(integrity_failures)}" if integrity_failures else "")
+                + (f" stale-hash={len(stale_compressed)}" if stale_compressed else "")
             )
             if committed and not args.quiet:
                 print("\n".join(committed))

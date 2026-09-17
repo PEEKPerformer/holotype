@@ -23,9 +23,19 @@ Reproduced on git 2.54 with a scratch repository: four commits in a row left fiv
 
 Loose objects now accumulate until you pack them. To pack only the loose objects, without rewriting the existing large pack, run `git -C <archive> repack -d`.
 
+### Stale compressed hashes no longer read as integrity failures
+
+On a real archive, 1,832 of 5,315 compressed deposits failed the rolling-sweep fsck with `ARCHIVE INTEGRITY FAILURE` ("stored bytes do not match manifest hash"). Every one of them decompressed to exactly the canonical `sha256`. The content was intact; only `sha256_compressed` was wrong. All 1,832 were deposited on the same day by v2.1.0 and migrated by v2.3.0.
+
+The v2.3.0 pure-migration path copied `sha256_compressed` from the prior manifest instead of hashing the file, so a stale value survived the migration. The sweep checks only the compressed hash, so each sweep slice reported about 40 false failures, and the real signal was lost in them.
+
+- The pure-migration path now hashes the `.zst` file on disk.
+- The fsck decompresses a deposit whose compressed hash disagrees. If the canonical `sha256` matches, it counts the deposit as `stale-hash`, not as an integrity failure. Real damage is still reported as before.
+- New `scripts/repair_compressed_hashes.py` rewrites stale values in one `repair:` commit. It changes only the `sha256_compressed` string, and only after the canonical hash matches, so transcripts and the ledger are untouched. `--dry-run` reports without writing. Damaged deposits are listed and never rewritten.
+
 ### Tests
 
-The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset.
+The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset. A new step covers stale compressed hashes: the migration rehashes, the fsck reports stale instead of failed, the repair commits, and real damage is still caught.
 
 ## [2.4.0] — 2026-05-28
 

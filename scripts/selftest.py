@@ -1581,6 +1581,55 @@ def main(argv: list[str] | None = None) -> int:
             expect(res.returncode == 0,
                    f"verify failed after pure migration: {res.stderr or res.stdout}")
 
+            step("stale sha256_compressed: migration rehashes, fsck and repair tell it from damage")
+            # A stale recorded compressed hash (content intact) must not
+            # survive a migration: the migration hashes the file on disk.
+            zc_obj = json.loads(zc_manifest.read_text())
+            zc_obj["manifest_version"] = 3
+            zc_obj["sha256_compressed"] = "0" * 64
+            zc_manifest.write_text(json.dumps(zc_obj, indent=2, sort_keys=True) + "\n")
+            res = run_script(
+                REPO_ROOT / "scripts" / "ingest.py", "--archive", str(zc_archive),
+                "--source", str(zc_src), "--source-name", "claude-code", "--workers", "1",
+            )
+            expect(res.returncode == 0, f"zc stale-hash migration failed: {res.stderr}")
+            post = json.loads(zc_manifest.read_text())
+            expect(post.get("sha256_compressed") == hashlib.sha256(zc_zst.read_bytes()).hexdigest(),
+                   "migration carried a stale sha256_compressed forward")
+
+            # The fsck reports a stale hash as stale, not as an integrity failure.
+            zc_obj = json.loads(zc_manifest.read_text())
+            real_hash = zc_obj["sha256_compressed"]
+            zc_obj["sha256_compressed"] = "0" * 64
+            zc_manifest.write_text(json.dumps(zc_obj, indent=2, sort_keys=True) + "\n")
+            # Commit the stale value, as it would be in a real archive.
+            subprocess.run(["git", "-C", str(zc_archive), "commit", "-qam", "test: stale hash"],
+                           check=True)
+            stale: list[str] = []
+            fsck_err = _ig.verify_deposit_integrity(zc_archive, zc_cand, stale)
+            expect(fsck_err is None and stale == [zc_cand.archive_subpath],
+                   f"stale compressed hash misreported (err={fsck_err!r}, stale={stale})")
+
+            # The repair script rewrites it and commits; verify is clean after.
+            res = run_script(REPO_ROOT / "scripts" / "repair_compressed_hashes.py",
+                             "--archive", str(zc_archive))
+            expect(res.returncode == 0, f"repair failed: {res.stderr or res.stdout}")
+            expect(json.loads(zc_manifest.read_text())["sha256_compressed"] == real_hash,
+                   "repair did not restore the real sha256_compressed")
+            log = subprocess.run(["git", "-C", str(zc_archive), "log", "-1", "--format=%s"],
+                                 capture_output=True, text=True).stdout
+            expect(log.startswith("repair:"), f"repair did not commit (HEAD: {log!r})")
+
+            # Real damage is still an integrity failure and is never rewritten.
+            zc_zst.write_bytes(b"not zstd at all")
+            stale = []
+            fsck_err = _ig.verify_deposit_integrity(zc_archive, zc_cand, stale)
+            expect(fsck_err is not None and "INTEGRITY" in fsck_err and not stale,
+                   f"damaged deposit not reported as failure (err={fsck_err!r})")
+            res = run_script(REPO_ROOT / "scripts" / "repair_compressed_hashes.py",
+                             "--archive", str(zc_archive))
+            expect(res.returncode == 1, f"repair should exit 1 on damage, got {res.returncode}")
+
         print("\nALL CHECKS PASSED")
         success = True
         return 0
