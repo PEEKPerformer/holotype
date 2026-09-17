@@ -1413,6 +1413,20 @@ def main(argv: list[str] | None = None) -> int:
                 len(basic_yields) == 1,
                 f"dedup failed: session yielded {len(basic_yields)} times across mirrored paths",
             )
+
+            # When the first path's copy is evicted to iCloud (dataless) and
+            # the mirror's copy is on disk, dedup keeps the readable one, and
+            # a deposit from an evicted copy is skipped instead of failing.
+            mod.is_dataless = lambda p: Path(p).is_relative_to(source.resolve())
+            cands = mod.discover_candidates({}, None, None)
+            picked = [c for cls, c in cands
+                      if cls is ClaudeCodeSource and c.session_id == basic_uuid_dup]
+            expect(len(picked) == 1 and picked[0].jsonl_path.is_relative_to(mirror_src.resolve()),
+                   f"dedup kept an evicted copy: {[str(c.jsonl_path) for c in picked]}")
+            mod.is_dataless = lambda p: True
+            status, _, _ = mod.deposit_one(archive, ClaudeCodeSource, picked[0], compression=None)
+            expect(status == "skipped-offline",
+                   f"evicted source should be skipped-offline, got {status}")
         finally:
             ClaudeCodeSource.default_source_paths = saved_paths
 

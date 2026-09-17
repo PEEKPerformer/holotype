@@ -33,9 +33,16 @@ The v2.3.0 pure-migration path copied `sha256_compressed` from the prior manifes
 - The fsck decompresses a deposit whose compressed hash disagrees. If the canonical `sha256` matches, it counts the deposit as `stale-hash`, not as an integrity failure. Real damage is still reported as before.
 - New `scripts/repair_compressed_hashes.py` rewrites stale values in one `repair:` commit. It changes only the `sha256_compressed` string, and only after the canonical hash matches, so transcripts and the ledger are untouched. `--dry-run` reports without writing. Damaged deposits are listed and never rewritten.
 
+### iCloud-evicted source files are skipped, not failed
+
+Every sweep also logged dozens of `holotype: worker failed on ...: OSError: [Errno 11] Resource deadlock avoided`. The preferred source was a Claude Code backup mirror under `~/Documents`, which iCloud syncs. With "Optimize Mac Storage" on, iCloud had evicted 3,556 of its 11,311 transcripts: the bytes live in the cloud and only a placeholder (`SF_DATALESS`) is on disk. A background process like the launchd tick may not download it, so the read fails with `EDEADLK`.
+
+- Discovery still keeps the first path listed for a session, unless that copy is evicted and a later path has the file on disk. On the real archive, every evicted candidate had a local copy in `~/.claude/projects`.
+- `deposit_one` skips an evicted source with a new `skipped-offline` status instead of raising. The prior deposit stands, and the session is read again once the file is local. The tick summary shows `offline=N` when any were skipped.
+
 ### Tests
 
-The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset. A new step covers stale compressed hashes: the migration rehashes, the fsck reports stale instead of failed, the repair commits, and real damage is still caught.
+The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset. A new step covers stale compressed hashes: the migration rehashes, the fsck reports stale instead of failed, the repair commits, and real damage is still caught. Another step checks that discovery prefers an on-disk copy over an evicted one and that an evicted source is skipped as offline.
 
 ## [2.4.0] — 2026-05-28
 

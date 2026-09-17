@@ -29,6 +29,7 @@ read because CodexSource.default_source_paths() returns only
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -112,13 +113,18 @@ def discover_candidates(
     Claude Code itself prunes).
     """
     candidates: list[tuple[type[Source], DepositCandidate]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: dict[tuple[str, str], int] = {}
 
     def _add(cls: type[Source], c: DepositCandidate) -> None:
         key = (cls.name, c.session_id)
         if key in seen:
+            # Keep the first path, unless its copy has been evicted to the
+            # cloud and this one is still on disk (see is_dataless).
+            first = seen[key]
+            if is_dataless(candidates[first][1].jsonl_path) and not is_dataless(c.jsonl_path):
+                candidates[first] = (cls, c)
             return
-        seen.add(key)
+        seen[key] = len(candidates)
         candidates.append((cls, c))
 
     if explicit_source is not None:
@@ -146,6 +152,20 @@ def discover_candidates(
                 _add(cls, c)
 
     return candidates
+
+
+# macOS SF_DATALESS: the file's bytes were evicted to iCloud ("Optimize Mac
+# Storage") and only a placeholder is on disk. A background process such as
+# the launchd tick is not allowed to download it, so reading fails with
+# EDEADLK ("Resource deadlock avoided"). Always 0 on other platforms.
+SF_DATALESS = 0x40000000
+
+
+def is_dataless(path: Path) -> bool:
+    try:
+        return bool(getattr(path.stat(), "st_flags", 0) & SF_DATALESS)
+    except OSError:
+        return False
 
 
 def is_live_file(path: Path) -> bool:
@@ -361,7 +381,16 @@ def deposit_one(
     if is_live_file(jsonl_path):
         return ("skipped-live", session_id, False)
 
-    data = read_with_stable_check(jsonl_path)
+    # An evicted source can't be read from here. The prior deposit, if
+    # any, stands; the session is picked up once the file is local again.
+    if is_dataless(jsonl_path):
+        return ("skipped-offline", session_id, False)
+    try:
+        data = read_with_stable_check(jsonl_path)
+    except OSError as e:
+        if e.errno == errno.EDEADLK:
+            return ("skipped-offline", session_id, False)
+        raise
     if data is None:
         return ("skipped-live", session_id, False)
     if not data.strip():
@@ -934,7 +963,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         counts: dict[str, int] = {"new": 0, "updated": 0, "skipped-live": 0,
-                                  "skipped-unchanged": 0, "skipped-empty": 0}
+                                  "skipped-unchanged": 0, "skipped-empty": 0,
+                                  "skipped-offline": 0}
         committed: list[str] = []
 
         # Per-tick pre-filter: stat each candidate against its stored
@@ -1305,6 +1335,7 @@ def main(argv: list[str] | None = None) -> int:
                 f" swept={len(sweep_candidates)}"
                 + (f" INTEGRITY-FAIL={len(integrity_failures)}" if integrity_failures else "")
                 + (f" stale-hash={len(stale_compressed)}" if stale_compressed else "")
+                + (f" offline={counts['skipped-offline']}" if counts["skipped-offline"] else "")
             )
             if committed and not args.quiet:
                 print("\n".join(committed))
