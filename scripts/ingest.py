@@ -42,6 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from holotype import __version__
+from holotype.archive import disable_auto_maintenance
 from holotype.chunking import bin_pack_paths, dir_size_bytes
 from holotype.compression import compress_bytes, find_transcript, transcript_filename
 from holotype.env import claude_code_version, git_state_for_path, platform_info
@@ -901,6 +902,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print("holotype: another ingest is running, exiting")
         return 0
+
+    # Before the first commit of this tick, so no commit can start a
+    # detached repack. Also migrates archives created before this setting.
+    if not args.dry_run:
+        disable_auto_maintenance(archive)
 
     try:
         counts: dict[str, int] = {"new": 0, "updated": 0, "skipped-live": 0,

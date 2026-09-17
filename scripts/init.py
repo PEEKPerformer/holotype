@@ -35,6 +35,7 @@ from textwrap import dedent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from holotype import ledger  # noqa: E402
+from holotype.archive import disable_auto_maintenance  # noqa: E402
 
 ARCHIVE_FORMAT_VERSION = 1
 HOLOTYPE_SUBDIR = ".holotype"
@@ -525,6 +526,7 @@ def init_archive(args: argparse.Namespace) -> int:
     is_new_repo = not (archive / ".git").exists()
     if is_new_repo:
         run(["git", "init", "-b", "main"], cwd=archive)
+    disable_auto_maintenance(archive)
 
     if args.sign_commits:
         # Probe for a signing key. Don't fail init outright — the user

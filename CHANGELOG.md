@@ -2,6 +2,31 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-09-17
+
+Holotype now turns off git's automatic maintenance in the archive. On a large archive it could exhaust the machine's memory.
+
+### The failure
+
+git runs `git maintenance run --auto --detach` after every commit. When the loose-object count passes `gc.auto`, that starts a detached full repack (`git repack --cruft` and `git pack-objects --all`). Nothing stops a second repack from starting while the first is still running: each commit starts its own. One ingest tick makes one commit per changed session, so a busy tick starts several repacks at once.
+
+An archive's pack is mostly zstd or git-crypt blobs, which do not delta or compress. Every repack therefore reads the whole pack and holds gigabytes while it runs. On a real archive (7.3 GiB pack, 16 GB Mac) the repacks stacked up over one tick to 63 `git` processes and about 44 GB of memory. They never finished, the pack was never rewritten, the loose-object count stayed over the threshold, and every later commit started another repack. The machine ran out of memory and had to be force-restarted.
+
+Reproduced on git 2.54 with a scratch repository: four commits in a row left five concurrent `pack-objects --all` processes.
+
+### The fix
+
+- New `holotype.archive.disable_auto_maintenance()` sets `maintenance.auto=false` and `gc.auto=0` in the archive's local `.git/config`. It writes only when a value differs.
+- `init.py` calls it right after `git init`.
+- `ingest.py` calls it under the ingest lock, before the tick's first commit. Existing archives are migrated on their next tick with no action from you.
+- No archive-format change. Nothing tracked in the archive changes.
+
+Loose objects now accumulate until you pack them. To pack only the loose objects, without rewriting the existing large pack, run `git -C <archive> repack -d`.
+
+### Tests
+
+The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset.
+
 ## [2.4.0] — 2026-05-28
 
 The archive's "hash chain" is now a real chain. Until this release, "hash chain" named an aspiration: each `manifest.json` carried the SHA-256 of its own transcript, and `verify.py` checked each file against its *own* manifest. That proves per-file content integrity but binds nothing across deposits — a coordinated edit of a transcript *and* its manifest is internally consistent and passed `verify.py` clean. The only thing recording the set and order of deposits was git's commit DAG, which a self-contained `paper_bundle` `.tar.gz` (shipped with no `.git`) doesn't carry. So a reviewer holding a bundle could confirm self-consistency but not that nothing had been inserted, deleted, or substituted.

@@ -12,6 +12,7 @@ layout — they just walk anything under `sessions/` that has both a
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Iterator
 
@@ -62,3 +63,41 @@ def resolve_session_by_prefix(archive: Path, prefix: str) -> Path | None:
             sys.stderr.write(f"  {m.name}\n")
         return None
     return matches[0]
+
+
+# git runs `git maintenance run --auto --detach` after every commit. Once
+# the loose-object count crosses gc.auto, each commit starts its own
+# detached full repack (`pack-objects --all`), and nothing stops a second
+# one from starting while the first is still running. An archive's pack
+# is mostly incompressible blobs (zstd or git-crypt), so each repack holds
+# gigabytes and runs for a long time. One ingest tick makes one commit
+# per changed session, which is enough to stack repacks until the machine
+# runs out of memory. Holotype turns automatic maintenance off in the
+# archive; repack by hand with `git repack -d` when loose objects pile up.
+AUTO_MAINTENANCE_OFF = (
+    ("maintenance.auto", "false"),
+    ("gc.auto", "0"),
+)
+
+
+def disable_auto_maintenance(archive: Path) -> None:
+    """Turn off git's automatic background maintenance for ``archive``.
+
+    Writes to the archive's local ``.git/config`` only, and only when a
+    value differs, so calling this every ingest tick is cheap. Failures
+    are ignored: a missing setting costs memory, not correctness.
+    """
+    for key, value in AUTO_MAINTENANCE_OFF:
+        try:
+            current = subprocess.run(
+                ["git", "-C", str(archive), "config", "--local", "--get", key],
+                capture_output=True, text=True, timeout=10,
+            )
+            if current.stdout.strip() == value:
+                continue
+            subprocess.run(
+                ["git", "-C", str(archive), "config", "--local", key, value],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pass

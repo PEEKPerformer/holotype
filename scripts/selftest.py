@@ -171,6 +171,20 @@ def main(argv: list[str] | None = None) -> int:
         expect((archive / "README.md").exists(), "archive README.md missing")
         expect((archive / ".git").is_dir(), "archive is not a git repo")
 
+        step("init.py turns off git auto-maintenance in the archive")
+        for key, want in (("maintenance.auto", "false"), ("gc.auto", "0")):
+            got = subprocess.run(
+                ["git", "-C", str(archive), "config", "--local", "--get", key],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            expect(got == want, f"archive {key}={got!r}, expected {want!r}")
+            # Unset again so the first ingest below has to migrate an
+            # archive created before this setting existed.
+            subprocess.run(
+                ["git", "-C", str(archive), "config", "--local", "--unset", key],
+                check=True,
+            )
+
         step("materialize synthetic source")
         source = materialize_source(tmp)
 
@@ -185,6 +199,14 @@ def main(argv: list[str] | None = None) -> int:
             print(result.stderr, file=sys.stderr)
         expect(result.returncode == 0, f"ingest.py returncode={result.returncode}: {result.stderr}")
         expect("new=3" in result.stdout, f"expected new=3 in output:\n{result.stdout}")
+
+        step("ingest turns off git auto-maintenance on an older archive")
+        for key, want in (("maintenance.auto", "false"), ("gc.auto", "0")):
+            got = subprocess.run(
+                ["git", "-C", str(archive), "config", "--local", "--get", key],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            expect(got == want, f"archive {key}={got!r} after ingest, expected {want!r}")
 
         sessions_dir = archive / "sessions"
         deposits = sorted(p for p in sessions_dir.rglob("transcript.jsonl"))
