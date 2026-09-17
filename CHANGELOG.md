@@ -40,9 +40,13 @@ Every sweep also logged dozens of `holotype: worker failed on ...: OSError: [Err
 - Discovery still keeps the first path listed for a session, unless that copy is evicted and a later path has the file on disk. On the real archive, every evicted candidate had a local copy in `~/.claude/projects`.
 - `deposit_one` skips an evicted source with a new `skipped-offline` status instead of raising. The prior deposit stands, and the session is read again once the file is local. The tick summary shows `offline=N` when any were skipped.
 
+### Auto-push has a timeout
+
+`ingest.py` ran `git push` with no timeout. A push that stalls instead of failing (a dropped connection that never resets, a laptop that sleeps mid-push) would hold the ingest lock forever, and every later tick would exit with "another ingest is running". Pushes now go through `run_with_timeout` with a one-hour limit (`PUSH_TIMEOUT_SECONDS`), enough for a `--max-pack-gib` chunk on a slow uplink. On timeout it kills the push's whole process group, so ssh and `pack-objects` don't outlive it. The failure is reported like any other push failure, and the next tick with changes retries.
+
 ### Tests
 
-The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset. A new step covers stale compressed hashes: the migration rehashes, the fsck reports stale instead of failed, the repair commits, and real damage is still caught. Another step checks that discovery prefers an on-disk copy over an evicted one and that an evicted source is skipped as offline.
+The selftest checks that `init.py` sets both keys, and that `ingest.py` restores them on an archive where they are unset. A new step covers stale compressed hashes: the migration rehashes, the fsck reports stale instead of failed, the repair commits, and real damage is still caught. Another step checks that discovery prefers an on-disk copy over an evicted one and that an evicted source is skipped as offline. A third checks that the timeout stops a stalled command and leaves no grandchild running.
 
 ## [2.4.0] — 2026-05-28
 

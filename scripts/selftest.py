@@ -1456,6 +1456,19 @@ def main(argv: list[str] | None = None) -> int:
         _ig = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(_ig)
 
+        # A stalled push must not hang the tick, and the timeout must kill
+        # the command's whole process group, grandchildren included.
+        import time as _t
+        t0 = _t.monotonic()
+        res = _ig.run_with_timeout(["sh", "-c", "sleep 37 & sleep 37"], timeout=1)
+        expect(_t.monotonic() - t0 < 10 and res.returncode != 0 and "timed out" in res.stderr,
+               f"run_with_timeout did not stop the stalled command (rc={res.returncode}, "
+               f"{_t.monotonic() - t0:.1f}s)")
+        _t.sleep(0.5)
+        orphans = subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True, text=True)
+        expect(orphans.stdout.strip() == "",
+               f"run_with_timeout left grandchildren running: {orphans.stdout.split()}")
+
         # Rolling-sweep partition must cover every session exactly once
         # across the full bucket range — no session is permanently skipped.
         _ids = [f"sess-{i}" for i in range(400)]

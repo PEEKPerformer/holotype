@@ -34,6 +34,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -346,6 +347,40 @@ def run_git(archive: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+# A push that stalls (dropped connection, sleeping laptop, captive portal)
+# never returns on its own, and the ingest lock blocks every later tick
+# while it waits. One hour covers a --max-pack-gib chunk on a slow uplink.
+PUSH_TIMEOUT_SECONDS = 3600
+
+
+def run_with_timeout(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run ``cmd``; on timeout, kill its whole process group.
+
+    ``subprocess.run(timeout=...)`` kills only the direct child, so a timed
+    out ``git push`` would leave its ssh and pack-objects children running.
+    A new session puts the command and all its descendants in one process
+    group that can be killed together.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, err = proc.communicate()
+        err = (err or "") + f"\nholotype: timed out after {timeout:g}s; killed.\n"
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def push_git(archive: Path, *args: str) -> subprocess.CompletedProcess:
+    return run_with_timeout(["git", "-C", str(archive), *args], PUSH_TIMEOUT_SECONDS)
 
 
 def git_head_short(archive: Path) -> str | None:
@@ -1246,7 +1281,7 @@ def main(argv: list[str] | None = None) -> int:
                         # First chunk creates/upgrades the tracking
                         # branch; subsequent chunks fast-forward.
                         push_args = ["push", "-u", "origin", "main"] if ci == 1 else ["push", "origin", "HEAD"]
-                        push = run_git(archive, *push_args)
+                        push = push_git(archive, *push_args)
                         if push.returncode == 0:
                             if not args.quiet:
                                 print(f"  push chunk {ci}/{len(chunks)} OK")
@@ -1354,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
         if any_changes and auto_push and remote_url and not args.dry_run and not bulk_chunks_pushed:
             if not args.quiet:
                 print(f"  pushing to {remote_url}...")
-            push = run_git(archive, "push", "origin", "HEAD")
+            push = push_git(archive, "push", "origin", "HEAD")
             if push.returncode == 0:
                 if not args.quiet:
                     print("  push OK")
