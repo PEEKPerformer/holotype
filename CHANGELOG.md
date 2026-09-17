@@ -18,9 +18,20 @@ A session that is still being written changes on almost every tick, and each upd
 
 Replaying the real archive's last 15 days of history: a 6-hour window keeps 5,438 of 5,921 transcript versions and cuts history growth from 4.7 GB to about 0.9 GB.
 
+### `scripts/prune_local.py`: drop old local history
+
+The remote keeps the archive's full history, so the local clone doesn't need all of it. `prune_local.py` makes the local clone shallow, keeping commits from the last `--keep-days` days (default 7, at least the current commit), and deletes older objects from disk.
+
+- It doesn't touch the working tree or the remote. Verify, cite, search, and browse work as before, and the shallow clone still deposits and pushes normally. Local `git log` reaches back only `--keep-days`.
+- It deletes nothing unless every check passes: an `origin` remote exists, a fresh fetch shows every local commit on the remote, no other local branch or stash holds unpushed commits, and no ingest is running (it holds the ingest lock throughout).
+- Without `--yes` it prints the plan only.
+- It is never run automatically. It uses `repack -a -d` with `pack.window=0`, so it doesn't spend memory on a delta search that encrypted, compressed blobs can't use.
+
+On an APFS clone of the real archive (850 local commits over 15 days, 13.2 GiB of objects): keeping 14 days freed 0.7 GiB, because almost all the local history was younger than that. Keeping 2 days freed another 4.4 GiB, ending at 8.1 GiB. That run took 56 seconds and peaked at 2.6 GiB resident memory. The floor is roughly one encrypted copy of every current transcript plus the window's updates.
+
 ### Tests
 
-The update step of the selftest now checks that a fresh change waits (`settling=1`) and that `--settle-hours 0` deposits it. New assertions cover the window, the 24-hour cap, and 0 disabling it.
+The update step of the selftest now checks that a fresh change waits (`settling=1`) and that `--settle-hours 0` deposits it. New assertions cover the window, the 24-hour cap, and 0 disabling it. A new prune step uses a bare remote: prune refuses while a commit is unpushed, plans without `--yes`, and with `--yes` removes a blob that only 30- and 40-day-old commits reach. It keeps the working tree, leaves the remote's history intact, and still pushes afterwards.
 
 ## [2.4.1] - 2026-09-17
 

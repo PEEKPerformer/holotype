@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import shutil
 import subprocess
 import sqlite3
@@ -1106,6 +1106,58 @@ def main(argv: list[str] | None = None) -> int:
         cloned_manifests = list((clone_dir / "sessions").rglob("manifest.json"))
         expect(len(cloned_manifests) >= 1,
                f"auto-push didn't deliver any session to the remote (cloned manifests: {len(cloned_manifests)})")
+
+        step("prune_local.py makes the archive shallow only when the remote has everything")
+        def _git(*a, env_extra=None):
+            env = dict(os.environ, **(env_extra or {}))
+            return subprocess.run(["git", "-C", str(ap_archive), *a],
+                                  capture_output=True, text=True, env=env)
+        # Two old commits (40 and 30 days ago) holding a blob that the
+        # newest commit replaces, so the old blob is reachable only from
+        # history outside a 5-day window.
+        old_file = ap_archive / "old-history.txt"
+        old_blobs = []
+        for days in (40, 30):
+            old_file.write_text(f"superseded version from {days} days ago\n")
+            when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            _git("add", "old-history.txt")
+            _git("commit", "-q", "-m", f"test: {days} days old",
+                 env_extra={"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when})
+            old_blobs.append(_git("rev-parse", "HEAD:old-history.txt").stdout.strip())
+        old_file.write_text("current version\n")
+        _git("add", "old-history.txt")
+        _git("commit", "-q", "-m", "test: current")
+        prune = REPO_ROOT / "scripts" / "prune_local.py"
+
+        res = run_script(prune, "--archive", str(ap_archive), "--keep-days", "5", "--yes")
+        expect(res.returncode == 1 and "not on origin" in res.stderr,
+               f"prune must refuse with unpushed commits (rc={res.returncode}): {res.stderr}")
+        expect(not (ap_archive / ".git" / "shallow").exists(), "refused prune still made the clone shallow")
+
+        expect(_git("push", "-q", "origin", "HEAD").returncode == 0, "test push failed")
+        res = run_script(prune, "--archive", str(ap_archive), "--keep-days", "5")
+        expect(res.returncode == 0 and "plan only" in res.stdout,
+               f"prune without --yes should only plan: {res.stdout}{res.stderr}")
+        expect(not (ap_archive / ".git" / "shallow").exists(), "plan-only prune changed the clone")
+
+        res = run_script(prune, "--archive", str(ap_archive), "--keep-days", "5", "--yes")
+        expect(res.returncode == 0, f"prune failed: {res.stdout}{res.stderr}")
+        expect((ap_archive / ".git" / "shallow").exists(), "prune did not make the clone shallow")
+        for blob in old_blobs:
+            expect(_git("cat-file", "-e", blob).returncode != 0,
+                   f"old blob {blob} still in the local object store after prune")
+        expect(old_file.read_text() == "current version\n", "prune changed the working tree")
+        cloned_manifests_after = list((ap_archive / "sessions").rglob("manifest.json"))
+        expect(len(cloned_manifests_after) >= 1, "prune removed deposited sessions from the working tree")
+        # The remote still has the full history, and the shallow clone can
+        # still commit and push.
+        full = subprocess.run(["git", "-C", str(bare_remote), "cat-file", "-e", old_blobs[0]])
+        expect(full.returncode == 0, "old history missing from the remote")
+        old_file.write_text("after prune\n")
+        _git("add", "old-history.txt")
+        _git("commit", "-q", "-m", "test: after prune")
+        expect(_git("push", "-q", "origin", "HEAD").returncode == 0,
+               "shallow archive could not push after prune")
 
         step("paper_bundle.py packages multiple sessions with a master manifest")
         # Pull a Claude Code session + the Codex one + the Antigravity one.

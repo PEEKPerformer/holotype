@@ -236,6 +236,7 @@ Read these before any operation:
 | Install macOS scheduled-backup job (auto, at setup) | `python scripts/install-launchd.py --archive <p>` |
 | Deposit new sessions (preferred — from the rsync backup) | `python scripts/ingest.py --source ~/Documents/Claude-Backups` |
 | Deposit directly from live Claude Code state | `python scripts/ingest.py --source ~/.claude/projects` |
+| Free disk space by dropping local history older than 7 days (remote keeps all of it; refuses unless everything is pushed) | `python scripts/prune_local.py` to see the plan, then `--yes` |
 | Browse the archive in a browser (localhost server, no disk cache) | `python scripts/browse.py` |
 | Find sessions matching text (FTS5) | `python scripts/search.py "<query>"` |
 | Just the citation string for one session | `python scripts/cite.py <session-id> --citation-only` |
