@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -167,6 +168,33 @@ def is_dataless(path: Path) -> bool:
         return bool(getattr(path.stat(), "st_flags", 0) & SF_DATALESS)
     except OSError:
         return False
+
+
+# Settle window. A session that is still being written changes on nearly
+# every tick, and each re-deposit stores the whole transcript again: an
+# encrypted, compressed blob gets no delta against its previous version. On
+# a real archive one 26 MB session was stored 129 times in two weeks
+# (1.8 GiB). So a changed session that already has a deposit waits until its
+# source has been quiet for the settle window. New sessions deposit at once.
+# The wait is capped: after SETTLE_MAX_DEFER_SECONDS since the last deposit,
+# the update goes through even if the session is still active.
+DEFAULT_SETTLE_HOURS = 6.0
+SETTLE_MAX_DEFER_SECONDS = 24 * 3600
+
+
+def should_defer_update(prior_manifest: dict, source_mtime: float,
+                        settle_seconds: float, now: float | None = None) -> bool:
+    """True if a content update to an existing deposit should wait."""
+    if settle_seconds <= 0:
+        return False
+    now = time.time() if now is None else now
+    if now - source_mtime >= settle_seconds:
+        return False
+    try:
+        last = datetime.fromisoformat(prior_manifest["deposited_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return False
+    return now - last < SETTLE_MAX_DEFER_SECONDS
 
 
 def is_live_file(path: Path) -> bool:
@@ -395,8 +423,13 @@ def deposit_one(
     *,
     compression: str | None,
     compression_level: str = "archival",
+    settle_seconds: float = 0,
 ) -> tuple[str, str, bool]:
     """Deposit one candidate. Returns (status, session_id, transcript_changed).
+
+    With ``settle_seconds > 0``, a content update to an existing deposit is
+    returned as ``skipped-settling`` while the source is still changing (see
+    ``should_defer_update``). New deposits and pure migrations never wait.
 
     ``transcript_changed`` is True only when the on-disk transcript bytes
     differ from the prior deposit (i.e. a real "new" or content-update).
@@ -462,6 +495,14 @@ def deposit_one(
         return ("skipped-unchanged", session_id, False)
 
     transcript_changed = (prior_sha != new_sha)
+
+    if (
+        prior_manifest is not None
+        and transcript_changed
+        and src_mtime_ns is not None
+        and should_defer_update(prior_manifest, src_mtime_ns / 1e9, settle_seconds)
+    ):
+        return ("skipped-settling", session_id, False)
 
     # Pure manifest-version migration: canonical transcript bytes are
     # unchanged, only the schema bumped. Do NOT re-write the transcript.
@@ -793,11 +834,13 @@ def _parallel_worker_unpack(args_tuple):
     fixed-config + per-task tuple here so each pool task can unpack
     it cleanly. Lives at module top so it's picklable.
     """
-    archive_str, source_name, candidate_dict, compression, compression_level = args_tuple
+    (archive_str, source_name, candidate_dict, compression, compression_level,
+     settle_seconds) = args_tuple
     from holotype.parallel import process_candidate_worker
     return process_candidate_worker(
         archive_str, source_name, candidate_dict,
         compression=compression, compression_level=compression_level,
+        settle_seconds=settle_seconds,
     )
 
 
@@ -929,6 +972,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p.add_argument(
+        "--settle-hours",
+        type=float,
+        default=None,
+        help=(
+            "Wait until a changed session's source has been quiet this "
+            "many hours before re-depositing it (new sessions deposit at "
+            "once; an update is never deferred more than 24 h). Overrides "
+            "config.deposit.settle_hours (default 6). 0 re-deposits every "
+            "change on the next tick, e.g. to cite a session right now."
+        ),
+    )
+    p.add_argument(
         "--fast-compress",
         action="store_true",
         help=(
@@ -999,7 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         counts: dict[str, int] = {"new": 0, "updated": 0, "skipped-live": 0,
                                   "skipped-unchanged": 0, "skipped-empty": 0,
-                                  "skipped-offline": 0}
+                                  "skipped-offline": 0, "skipped-settling": 0}
         committed: list[str] = []
 
         # Per-tick pre-filter: stat each candidate against its stored
@@ -1070,6 +1125,13 @@ def main(argv: list[str] | None = None) -> int:
         # segment merges across the whole batch.
         bulk_fts_rows: list[tuple] = []
         compression_level = "fast" if args.fast_compress else "archival"
+        settle_hours = args.settle_hours
+        if settle_hours is None:
+            settle_hours = deposit_cfg.get("settle_hours", DEFAULT_SETTLE_HOURS)
+        try:
+            settle_seconds = max(0.0, float(settle_hours)) * 3600
+        except (TypeError, ValueError):
+            settle_seconds = DEFAULT_SETTLE_HOURS * 3600
 
         # Resolve worker count. 0 = auto. 1 = explicit serial mode.
         # Anything > 1 runs the parallel coordinator path.
@@ -1111,7 +1173,8 @@ def main(argv: list[str] | None = None) -> int:
                     results_iter = executor.map(
                         _parallel_worker_unpack,
                         [
-                            (s[0], s[1], s[2], compression, compression_level)
+                            (s[0], s[1], s[2], compression, compression_level,
+                             settle_seconds)
                             for s in submissions
                         ],
                     )
@@ -1140,6 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
                     status, session_id, transcript_changed = deposit_one(
                         archive, source_cls, candidate, compression=compression,
                         compression_level=compression_level,
+                        settle_seconds=settle_seconds,
                     )
                     counts[status] = counts.get(status, 0) + 1
 
@@ -1371,6 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
                 + (f" INTEGRITY-FAIL={len(integrity_failures)}" if integrity_failures else "")
                 + (f" stale-hash={len(stale_compressed)}" if stale_compressed else "")
                 + (f" offline={counts['skipped-offline']}" if counts["skipped-offline"] else "")
+                + (f" settling={counts['skipped-settling']}" if counts["skipped-settling"] else "")
             )
             if committed and not args.quiet:
                 print("\n".join(committed))

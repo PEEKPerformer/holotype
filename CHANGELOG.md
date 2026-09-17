@@ -2,6 +2,26 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-09-17
+
+Keeping the archive's disk use in check. On a real archive holotype used about 21 GB locally, and git history grew by 4.7 GB in 15 days.
+
+### Settle window for updates
+
+A session that is still being written changes on almost every tick, and each update stores the whole transcript again. A compressed, git-crypt-encrypted blob gets no delta against its previous version. One 26 MB session was stored 129 times in two weeks (1.8 GB); 605 of the archive's 839 commits were updates.
+
+- A content update to an existing deposit now waits until the source has been quiet for `deposit.settle_hours` (default 6). The tick counts it as `settling=N`.
+- The wait is capped at 24 hours after the last deposit, so a session that never goes quiet is still updated daily.
+- New sessions and pure manifest migrations never wait.
+- `--settle-hours` overrides the config for one run. `--settle-hours 0` deposits every change now, for example to cite a running session.
+- `init.py` writes `settle_hours: 6`. Existing archives without the key get the default.
+
+Replaying the real archive's last 15 days of history: a 6-hour window keeps 5,438 of 5,921 transcript versions and cuts history growth from 4.7 GB to about 0.9 GB.
+
+### Tests
+
+The update step of the selftest now checks that a fresh change waits (`settling=1`) and that `--settle-hours 0` deposits it. New assertions cover the window, the 24-hour cap, and 0 disabling it.
+
 ## [2.4.1] - 2026-09-17
 
 Holotype now turns off git's automatic maintenance in the archive. On a large archive it could exhaust the machine's memory.

@@ -34,6 +34,7 @@ def process_candidate_worker(
     *,
     compression: str | None,
     compression_level: str,
+    settle_seconds: float = 0,
 ) -> dict[str, Any]:
     """Process one deposit candidate inside a worker process.
 
@@ -91,6 +92,7 @@ def process_candidate_worker(
             archive, source_cls, cand,
             compression=compression,
             compression_level=compression_level,
+            settle_seconds=settle_seconds,
         )
         return {
             "status": status,

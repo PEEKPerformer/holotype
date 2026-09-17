@@ -346,6 +346,11 @@ def write_config(
             "commit_strategy": "per-session",
             "sign_commits": sign_commits,
             "compression": compression,
+            # Hours a changed session must be quiet before it is deposited
+            # again (new sessions deposit at once). Each update stores the
+            # whole transcript, so this bounds archive growth from sessions
+            # that are still being written. 0 deposits every change.
+            "settle_hours": 6,
             # When true and a remote is configured, ingest.py runs
             # `git push` after a successful ingest. Privacy decision was
             # made at remote-configuration time (the wizard's explicit

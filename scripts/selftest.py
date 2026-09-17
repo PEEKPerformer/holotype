@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from datetime import datetime, timezone
 import shutil
 import subprocess
 import sqlite3
@@ -331,10 +332,24 @@ def main(argv: list[str] | None = None) -> int:
         older = time.time() - 60
         os.utime(basic_in_source, (older, older))
 
+        # Changed a minute ago, so under the default 6 h settle window the
+        # update waits instead of storing a second full copy.
         result = run_script(
             REPO_ROOT / "scripts" / "ingest.py",
             "--archive", str(archive),
             "--source", str(source),
+        )
+        if args.verbose:
+            print(result.stdout)
+        expect("updated=0" in result.stdout and "settling=1" in result.stdout,
+               f"expected the update to wait for the settle window:\n{result.stdout}")
+
+        # --settle-hours 0 deposits the change now.
+        result = run_script(
+            REPO_ROOT / "scripts" / "ingest.py",
+            "--archive", str(archive),
+            "--source", str(source),
+            "--settle-hours", "0",
         )
         if args.verbose:
             print(result.stdout)
@@ -1468,6 +1483,21 @@ def main(argv: list[str] | None = None) -> int:
         orphans = subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True, text=True)
         expect(orphans.stdout.strip() == "",
                f"run_with_timeout left grandchildren running: {orphans.stdout.split()}")
+
+        # Settle window: an update waits while the source is recent, goes
+        # through once it is quiet, and is never deferred past the cap.
+        _now = 1_800_000_000.0
+        _hour = 3600.0
+        _prior = {"deposited_at": datetime.fromtimestamp(_now - 2 * _hour, timezone.utc).isoformat()}
+        expect(_ig.should_defer_update(_prior, _now - 60, 6 * _hour, now=_now) is True,
+               "recently changed session should wait for the settle window")
+        expect(_ig.should_defer_update(_prior, _now - 7 * _hour, 6 * _hour, now=_now) is False,
+               "session quiet longer than the window should deposit")
+        expect(_ig.should_defer_update(_prior, _now - 60, 0, now=_now) is False,
+               "settle 0 must never defer")
+        _old = {"deposited_at": datetime.fromtimestamp(_now - 25 * _hour, timezone.utc).isoformat()}
+        expect(_ig.should_defer_update(_old, _now - 60, 6 * _hour, now=_now) is False,
+               "an update deferred past the 24 h cap must go through")
 
         # Rolling-sweep partition must cover every session exactly once
         # across the full bucket range — no session is permanently skipped.
