@@ -1054,7 +1054,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         counts: dict[str, int] = {"new": 0, "updated": 0, "skipped-live": 0,
                                   "skipped-unchanged": 0, "skipped-empty": 0,
-                                  "skipped-offline": 0, "skipped-settling": 0}
+                                  "skipped-offline": 0, "skipped-settling": 0,
+                                  "error": 0}
         committed: list[str] = []
 
         # Per-tick pre-filter: stat each candidate against its stored
@@ -1425,7 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         any_changes = counts["new"] + counts["updated"] > 0
-        if not args.quiet or any_changes or integrity_failures:
+        if not args.quiet or any_changes or integrity_failures or counts["error"]:
             print(
                 f"holotype ingest: new={counts['new']} updated={counts['updated']}"
                 f" skipped-live={counts['skipped-live']}"
@@ -1436,6 +1437,7 @@ def main(argv: list[str] | None = None) -> int:
                 + (f" stale-hash={len(stale_compressed)}" if stale_compressed else "")
                 + (f" offline={counts['skipped-offline']}" if counts["skipped-offline"] else "")
                 + (f" settling={counts['skipped-settling']}" if counts["skipped-settling"] else "")
+                + (f" ERROR={counts['error']}" if counts["error"] else "")
             )
             if committed and not args.quiet:
                 print("\n".join(committed))

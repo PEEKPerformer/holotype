@@ -242,7 +242,7 @@ def reindex_session(
             if isinstance(obj, dict):
                 uuid = obj.get("uuid") or obj.get("id")
                 parent_uuid = obj.get("parentUuid") or obj.get("parent_id")
-        except json.JSONDecodeError:
+        except ValueError:  # incl. UnicodeDecodeError from bytes input
             pass
 
         message_rows.append((

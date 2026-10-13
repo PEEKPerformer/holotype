@@ -45,7 +45,7 @@ def models_in_transcript(jsonl_path: Path) -> list[str]:
         for line in f:
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:  # incl. UnicodeDecodeError from bytes input
                 continue
             msg = obj.get("message") if isinstance(obj, dict) else None
             if isinstance(msg, dict):

@@ -91,7 +91,10 @@ class ClaudeCodeSource(Source):
     def parse_line(line: bytes) -> MessageInfo | None:
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        # ValueError, not just JSONDecodeError: json.loads(bytes) sniffs the
+        # encoding and raises UnicodeDecodeError on undecodable bytes (a
+        # NUL-led line reads as UTF-32). One bad line must not fail the deposit.
+        except ValueError:
             return None
         if not isinstance(obj, dict):
             return None

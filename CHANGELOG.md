@@ -2,6 +2,22 @@
 
 All notable changes to `holotype`. Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] - 2026-10-13
+
+### One undecodable line no longer blocks a session's deposit
+
+On a real archive, ingest failed on one 72 MB Claude Code session on every tick for about 12 hours (25 consecutive ticks) with `UnicodeDecodeError: 'utf-32-be' codec can't decode bytes ... truncated data`. The session was deposited once the bad line was gone from the source.
+
+- `json.loads` on bytes picks the encoding from the first bytes. A line that starts with two NUL bytes is decoded as UTF-32 and raises `UnicodeDecodeError`, which is not a `JSONDecodeError`. Every source's `parse_line`, the model scan in `env.py`, the index rebuild and `cite.py` caught only `JSONDecodeError`, so the error escaped and failed the whole deposit.
+- They now catch `ValueError`, which covers both. The bad line is skipped for message counts and search, as malformed JSON already was. Its bytes are still deposited and hashed.
+- A failed worker's log line now names the holotype file and line that raised, for example `[at claude_code.py:93]`.
+- The tick summary reports `ERROR=N` and is printed under `--quiet` when any session failed. Before, failures appeared only in `holotype.err.log`.
+- `ADDING_A_SOURCE.md` tells new sources to catch `ValueError`.
+
+### Tests
+
+`tests/test_undecodable_lines.py` feeds a NUL-led line and an invalid-UTF-8 line through every source's `parse_line`, `build_manifest`, `models_in_transcript` and `reindex_session`.
+
 ## [2.5.0] - 2026-09-17
 
 Keeping the archive's disk use in check. On a real archive holotype used about 21 GB locally, and git history grew by 4.7 GB in 15 days.

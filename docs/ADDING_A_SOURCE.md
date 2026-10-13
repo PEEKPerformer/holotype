@@ -33,6 +33,9 @@ class MyCliSource(Source):
         # (state markers, blank lines, etc.) so they don't inflate
         # the message_count. Return None for session-header pseudo-
         # records with flags={"header"} if your format has one.
+        # `line` is bytes: catch ValueError around json.loads, not just
+        # JSONDecodeError. Undecodable bytes raise UnicodeDecodeError, and
+        # an uncaught one fails the whole session's deposit.
         ...
 
     @staticmethod

@@ -106,6 +106,15 @@ def process_candidate_worker(
             "error": None,
         }
     except Exception as e:
+        # Name the innermost holotype frame: the coordinator logs only this
+        # one line, and the exception text alone ("'utf-32-be' codec can't
+        # decode...") doesn't say which code path raised it.
+        import traceback
+        ours = [
+            f for f in traceback.extract_tb(e.__traceback__)
+            if _Path(f.filename).resolve().is_relative_to(repo_root)
+        ]
+        where = f" [at {_Path(ours[-1].filename).name}:{ours[-1].lineno}]" if ours else ""
         return {
             "status": "error",
             "session_id": cand.session_id,
@@ -115,7 +124,7 @@ def process_candidate_worker(
             "parent_session_id": cand.parent_session_id,
             "project_dir_encoded": cand.project_dir_encoded,
             "jsonl_path": str(cand.jsonl_path),
-            "error": f"{type(e).__name__}: {e}",
+            "error": f"{type(e).__name__}: {e}{where}",
         }
 
 

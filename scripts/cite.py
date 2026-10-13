@@ -75,7 +75,7 @@ def render_markdown(sess_dir: Path) -> str:
     for line in data.splitlines(keepends=True):
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except ValueError:  # incl. UnicodeDecodeError from bytes input
             continue
         if not isinstance(obj, dict):
             continue
